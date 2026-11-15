@@ -1,7 +1,7 @@
 // E0.2: tenant.yaml loader and `mandato validate`, end to end on copies of the demo tenant.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -98,4 +98,16 @@ test('review 10: malformed referenced JSON is a validation error, not a crash', 
   assert.ok(loadTenant(manifest).errors.some((e) => e.includes('invalid JSON')));
   const settings = copy((t, d) => writeFileSync(join(d, 'modules/hello/settings.schema.json'), '{"type": 5}'));
   assert.ok(loadTenant(settings).errors.some((e) => e.includes('not a valid schema')));
+});
+
+test('re-check 4: a credential under a plain `key` name is refused', () => {
+  assert.ok(loadTenant(copy((t) => { t.connectors[0].params.key = 'SYNTHETIC_CREDENTIAL'; })).errors.some((e) => e.includes('credential')));
+});
+test('re-check 6: a symlink that points outside the tenant is refused', () => {
+  const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+  cpSync(join(demo, 'theme/tokens.json'), join(outside, 'tokens.json'));
+  const dir = copy((t, d) => { symlinkSync(outside, join(d, 'theme-link')); t.theme = 'theme-link/tokens.json'; });
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('outside')));
+  const inner = copy((t, d) => { symlinkSync(join(d, 'theme'), join(d, 'theme-inner')); t.theme = 'theme-inner/tokens.json'; });
+  assert.deepEqual(loadTenant(inner).errors, []);
 });

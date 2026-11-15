@@ -2,14 +2,17 @@
 
 // §5: a credential is always a `*_secret_ref`. Any other key that names a credential, or a value that looks like one,
 // is refused anywhere in tenant.yaml, including module settings. The list errs on the side of refusing.
-const CREDENTIAL_KEY = /(secret|token|passw|pwd|api_?key|apikey|credential|authorization|bearer|cookie|private_?key|client_?secret|access_?key)/i;
+const CREDENTIAL_KEY = /(secret|token|passw|pwd|pin$|api_?key|apikey|credential|authorization|bearer|cookie|private_?key|client_?secret|access_?key|(^|_)key$|^key_|signature|salt)/i;
 const CREDENTIAL_VALUE = /^\s*(bearer|basic|token|digest)\s+\S|-----BEGIN [A-Z ]*PRIVATE KEY-----|^(sk|pk|rk)_(live|test)_|^gh[pousr]_[A-Za-z0-9]{20,}|^xox[abpr]-|^AKIA[0-9A-Z]{16}$|^eyJ[A-Za-z0-9_-]+\.eyJ/i;
+
+// Contract fields that hold public, non-secret material (publish_keys: Ed25519 public keys and their ids).
+const PUBLIC_KEYS = new Set(['public_key', 'key_id']);
 
 function credentials(value, path, problems) {
   if (Array.isArray(value)) value.forEach((v, i) => credentials(v, `${path}/${i}`, problems));
   else if (value && typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
-      if (CREDENTIAL_KEY.test(k) && !k.endsWith('_secret_ref')) problems.push(`${path}/${k} looks like an inline credential; use a *_secret_ref`);
+      if (CREDENTIAL_KEY.test(k) && !k.endsWith('_secret_ref') && !PUBLIC_KEYS.has(k)) problems.push(`${path}/${k} looks like an inline credential; use a *_secret_ref`);
       credentials(v, `${path}/${k}`, problems);
     }
   } else if (typeof value === 'string' && CREDENTIAL_VALUE.test(value)) problems.push(`${path} holds a value that looks like a credential; use a *_secret_ref`);

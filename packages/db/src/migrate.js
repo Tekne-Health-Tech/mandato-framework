@@ -1,8 +1,10 @@
 // `mandato bootstrap` and `mandato migrate` (backlog E0.4, design 0001 §7.2). Shells out to psql; connection comes
 // from the standard PG* environment variables, and the database name from the first argument.
-//   bootstrap: as a superuser, once per instance and whenever a module is added: applies 0001 if absent, creates
-//              each module's NOLOGIN owner role and schema, lets migrator SET ROLE to it.
-//   migrate:   as `migrator`, forward-only: records 0001, then applies module migrations in order, each in one
+//   bootstrap: as a superuser, once per instance, on every framework upgrade and whenever a module is added: applies
+//              0001 if absent and every later core migration not yet recorded (each in one transaction that also
+//              records it), creates each module's NOLOGIN owner role and schema, lets migrator SET ROLE to it.
+//   migrate:   as `migrator`, forward-only: records 0001 (applied before the log existed), refuses a core migration
+//              that bootstrap has not applied, then applies module migrations in order, each in one
 //              transaction under a migration lease and SET ROLE mod_<short>_owner. A recorded file whose hash
 //              changed aborts. Forbidden statements are rejected before anything runs.
 import { createHash, randomBytes } from 'node:crypto';
@@ -13,7 +15,8 @@ import { fileURLToPath } from 'node:url';
 import { inside, loadTenant } from '../../core-config/src/load.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
-const CORE = join(root, 'packages/db/migrations/0001_core.sql');
+const CORE_DIR = join(root, 'packages/db/migrations');
+const coreFiles = () => readdirSync(CORE_DIR).filter((f) => /^\d{4}_core\.sql$/.test(f)).sort();
 const sha = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
@@ -68,7 +71,20 @@ function ordered(mods) {
 
 export function bootstrap(db, tenantDir, superuser = process.env.PGUSER || 'postgres') {
   const has = psql(db, superuser, "select count(*) from pg_namespace where nspname = 'core'");
-  if (has === '0') psql(db, superuser, null, { file: CORE });
+  if (has === '0') psql(db, superuser, null, { file: join(CORE_DIR, '0001_core.sql') });
+  const recorded = new Map(psql(db, superuser, "select migration_id || '=' || sha256 from audit.migration_log where module_id = 'core'")
+    .split('\n').filter(Boolean).map((l) => l.split('=')));
+  for (const f of coreFiles().filter((x) => x !== '0001_core.sql')) {
+    const text = readFileSync(join(CORE_DIR, f), 'utf8'); const hash = sha(text);
+    if (recorded.has(f)) {
+      if (recorded.get(f) !== hash) throw new Error(`core migration ${f} changed after it was applied; migrations are forward-only`);
+      continue;
+    }
+    // Applied and recorded atomically: the superuser runs the file, then acts as migrator to record it under a lease.
+    psql(db, superuser, `begin;\n${text}\nset local session authorization migrator;
+      select audit.bind_migration('core', ${lit(f)}); select audit.record_migration('core', ${lit(f)}, ${lit(hash)});
+      commit;`);
+  }
   for (const m of localModules(tenantDir)) {
     const role = `mod_${m.short}_owner`;
     psql(db, superuser, `do $$ begin
@@ -84,7 +100,7 @@ export function bootstrap(db, tenantDir, superuser = process.env.PGUSER || 'post
 export function migrate(db, tenantDir, migrator = 'migrator') {
   const applied = new Map(psql(db, migrator, "select module_id || ':' || migration_id || '=' || sha256 from audit.migration_log")
     .split('\n').filter(Boolean).map((l) => l.split('=')));
-  const steps = [{ module: 'core', id: '0001_core.sql', file: CORE, core: true }];
+  const steps = coreFiles().map((f) => ({ module: 'core', id: f, file: join(CORE_DIR, f), core: true }));
   for (const m of ordered(localModules(tenantDir))) {
     if (!m.migrations || !existsSync(m.migrations)) continue;
     for (const f of readdirSync(m.migrations).filter((x) => x.endsWith('.sql')).sort()) steps.push({ module: m.id, short: m.short, id: f, file: join(m.migrations, f) });
@@ -103,7 +119,8 @@ export function migrate(db, tenantDir, migrator = 'migrator') {
       if (applied.get(key) !== hash) throw new Error(`migration ${key} changed after it was applied (recorded ${applied.get(key)}, file ${hash}); migrations are forward-only`);
       continue;
     }
-    if (s.core) {   // 0001 runs at bootstrap as superuser; migrate only records it, once.
+    if (s.core) {   // core migrations run at bootstrap as superuser; migrate only records 0001, which predates the log.
+      if (s.id !== '0001_core.sql') throw new Error(`core migration ${s.id} is not applied; run mandato bootstrap as the superuser first`);
       psql(db, migrator, `begin; select audit.bind_migration('core', ${lit(s.id)}); select audit.record_migration('core', ${lit(s.id)}, ${lit(hash)}); commit;`);
       done.push(key); continue;
     }

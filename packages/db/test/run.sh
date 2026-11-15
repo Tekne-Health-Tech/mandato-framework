@@ -190,5 +190,17 @@ rm -f "$TMPT/modules/hello/db/migrations/0002_bad.sql" "$TMPT/modules/hello/db/m
 fails "an applied migration whose file was deleted aborts" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
 rm -rf "$TMPT"
 
+echo "# upgrade of an instance built before 0002 (forward migration, never an edit of 0001)"
+UPG=${DB}_upgrade
+psql -X -q -U postgres -d postgres -c "drop database if exists $UPG" -c "create database $UPG" >/dev/null
+$PSQL -U postgres -d "$UPG" -f supabase-shim.sql >/dev/null && $PSQL -U postgres -d "$UPG" -f ../migrations/0001_core.sql >/dev/null 2>&1
+equals "before the upgrade migrator is a member of core_owner (0001 as merged)" 1 bash -c "$PSQL -U postgres -d $UPG -c \"select count(*) from pg_auth_members where member='migrator'::regrole and roleid='core_owner'::regrole\""
+fails "migrate refuses a core migration that bootstrap has not applied" bash -c "$MANDATO migrate $ROOT/tenants/demo $UPG 2>&1"
+ok "bootstrap applies 0002 to the existing instance" bash -c "$MANDATO bootstrap $ROOT/tenants/demo $UPG 2>&1"
+equals "after the upgrade migrator is a member of no core owner role" 0 bash -c "$PSQL -U postgres -d $UPG -c \"select count(*) from pg_auth_members where member='migrator'::regrole and roleid::regrole::text in ('core_owner','audit_owner','audit_archiver')\""
+ok "migrate then applies the module migrations" bash -c "$MANDATO migrate $ROOT/tenants/demo $UPG 2>&1"
+equals "a second bootstrap and migrate change nothing" "migrate: up to date" bash -c "$MANDATO bootstrap $ROOT/tenants/demo $UPG >/dev/null && $MANDATO migrate $ROOT/tenants/demo $UPG"
+psql -X -q -U postgres -d postgres -c "drop database if exists $UPG" >/dev/null
+
 echo "# summary: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

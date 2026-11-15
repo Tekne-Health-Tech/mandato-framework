@@ -1,7 +1,7 @@
 // tenant.yaml loader and validator (backlog E0.2, design 0001 §5). Pure Node, no network.
 // Returns { config, errors, pending }. `errors` make an instance invalid. `pending` lists references to framework
 // parts that later lanes deliver (core modules, connectors); `--strict` turns them into errors.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -22,15 +22,22 @@ const fmt = (where, errs) => (errs ?? []).map((e) => `${where}${e.instancePath |
 
 /** Contract version of this framework (design 0001 status line). Modules declare `requires_framework` against it. */
 export const FRAMEWORK_VERSION = '0.1.0';
-/** Framework modules and connectors that exist in this repository. Lanes add to these lists as they deliver. */
+/** Framework modules that exist in this repository. Lanes add to this list as they deliver. */
 export const FRAMEWORK_MODULES = [];
-export const INSTALLED_CONNECTORS = [];
+/** Installed connectors: source_id -> JSON Schema of its `params`. A connector lane delivers its schema with
+ *  `additionalProperties: false`; that schema, not the credential heuristic, is what keeps credentials out of
+ *  params in production (`--strict` refuses a connector that is not installed). */
+export const INSTALLED_CONNECTORS = {};
 
-/** Resolve a config-relative path and refuse anything that leaves `base` (absolute paths, `..`). */
+/** Resolve a config-relative path and refuse anything that leaves `base`: absolute paths, `..`, and symlinks that
+ *  point outside (the check compares real paths once the target exists). */
 export function inside(base, rel) {
   if (typeof rel !== 'string' || !rel || isAbsolute(rel)) return null;
-  const full = resolve(base, rel); const r = relative(resolve(base), full);
-  return r && !r.startsWith('..') && !isAbsolute(r) ? full : null;
+  const within = (b, f) => { const r = relative(b, f); return r && !r.startsWith('..') && !isAbsolute(r); };
+  const full = resolve(base, rel);
+  if (!within(resolve(base), full)) return null;
+  if (existsSync(full) && !within(realpathSync(base), realpathSync(full))) return null;
+  return full;
 }
 
 /** Read a JSON file below `base`; returns [value, error]. Never throws. */
@@ -87,7 +94,10 @@ export function loadTenant(dir, { strict = false } = {}) {
     } else if (m.settings && Object.keys(m.settings).length) errors.push(`module ${m.id}: settings given but the module declares no settings_schema`);
   }
   for (const c of config.connectors ?? []) {
-    if (!INSTALLED_CONNECTORS.includes(c.source_id)) pending.push(`connector ${c.source_id} is not delivered yet`);
+    const paramsSchema = INSTALLED_CONNECTORS[c.source_id];
+    if (!paramsSchema) { pending.push(`connector ${c.source_id} is not delivered yet`); continue; }
+    const v = ajv.compile(paramsSchema);
+    if (!v(c.params ?? {})) errors.push(...fmt(`connector ${c.source_id} params`, v.errors));
   }
   if (strict) errors.push(...pending.splice(0));
   return { config, errors, pending };
