@@ -533,8 +533,11 @@ begin
   if not audit.details_ok(coalesce(p_details, '{}'), p_entity) then
     raise exception 'audit: details may hold ids and field names only';
   end if;
-  if p_entity_id is not null and p_entity_id !~ '^[A-Za-z0-9_.:|-]{1,200}$' then
-    raise exception 'audit: entity_id must be a row key';
+  -- Direct callers name rows by uuid only. Composite or text keys come only from audit.row_trigger, which derives
+  -- them from the row's primary key, so a caller cannot smuggle free text in as an "id".
+  if p_entity_id is not null and p_entity_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     and not (pg_trigger_depth() > 0 and p_entity_id ~ '^[A-Za-z0-9_.:|-]{1,200}$') then
+    raise exception 'audit: entity_id must be a uuid';
   end if;
   insert into audit.event (actor_kind, actor_id, action, entity, entity_id, details, db_role)
   values (v_kind, v_id, p_action, p_entity, p_entity_id, coalesce(p_details, '{}'), session_user);
@@ -813,6 +816,13 @@ begin
     select format('%s on database %s', a.privilege_type, d.datname)
       from pg_database d cross join lateral aclexplode(d.datacl) a join pg_roles r on r.oid = a.grantee
      where d.datname = current_database() and r.rolname = any(v_roles) and a.privilege_type <> 'CONNECT'
+    union all
+    select format('%s on large object %s', a.privilege_type, lo.oid)
+      from pg_largeobject_metadata lo cross join lateral aclexplode(lo.lomacl) a join pg_roles r on r.oid = a.grantee
+     where r.rolname = any(v_roles)
+    union all
+    select format('owns large object %s', lo.oid)
+      from pg_largeobject_metadata lo join pg_roles r on r.oid = lo.lomowner where r.rolname = any(v_roles)
     union all
     select format('default privileges of %s', r.rolname)
       from pg_default_acl da join pg_roles r on r.oid = da.defaclrole where r.rolname = any(v_roles)

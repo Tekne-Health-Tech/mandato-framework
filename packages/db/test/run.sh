@@ -61,6 +61,16 @@ if [ $rc -ne 0 ] && echo "$out" | grep -q "bootstrap refused: contract roles hol
   pass=$((pass+1)); echo "ok   - bootstrap refuses a pre-existing role with grants outside the contract"
 else fail=$((fail+1)); echo "FAIL - bootstrap refuses a pre-existing role with grants outside the contract: rc=$rc $out"; fi
 psql -X -q -U postgres -d postgres -c "drop database $NEG" >/dev/null
+# Same for a large object granted to a contract role.
+psql -X -q -U postgres -d postgres -c "drop database if exists $NEG" -c "create database $NEG" >/dev/null 2>&1
+$PSQL -U postgres -d "$NEG" -f supabase-shim.sql >/dev/null
+LO=$($PSQL -U postgres -d "$NEG" -c "select lo_create(0)" | tail -1)
+$PSQL -U postgres -d "$NEG" -c "grant select on large object $LO to worker_c1" >/dev/null
+out=$($PSQL -U postgres -d "$NEG" -f ../migrations/0001_core.sql 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "large object $LO"; then
+  pass=$((pass+1)); echo "ok   - bootstrap refuses a contract role with a large-object grant"
+else fail=$((fail+1)); echo "FAIL - bootstrap refuses a contract role with a large-object grant: rc=$rc $out"; fi
+psql -X -q -U postgres -d postgres -c "drop database $NEG" >/dev/null
 
 echo "# access (aal2, staff)"
 equals "aal2 staff reads C1 content" 1 as api_rt "$(claims $COMM aal2)" "select count(*) from core.content_item"
@@ -97,6 +107,7 @@ fails "audit details refuse a personal value that looks like an identifier" as a
 fails "audit fields must be columns of the audited table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"fields\":[\"mariasilva\"]}')"
 fails "audit states must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"to_state\":\"mariasilva\"}')"
 fails "audit actions must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('mariasilva','core.content_item',null,'{}')"
+fails "audit entity_id from a direct caller must be a uuid" as api_rt "$(claims $CHIEF aal2)" "select audit.write('export','core.content_item','mariasilva','{}')"
 fails "audit entity must be an existing table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','maria.silva',null,'{}')"
 ok "audit details accept columns, ids, states and counts" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item','00000000-0000-7000-8000-0000000000c1','{\"fields\":[\"state\",\"type\"],\"ids\":[\"00000000-0000-7000-8000-0000000000c1\"],\"from_state\":\"draft\",\"to_state\":\"in_review\",\"count\":1}')"
 ok "editor updates a content version (audited)" as api_rt "$(claims $COMM aal2)" "update core.content_version set summary = 'novo' where content_id = '00000000-0000-7000-8000-0000000000c1' and n = 1"

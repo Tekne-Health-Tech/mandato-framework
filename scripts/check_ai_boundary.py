@@ -4,7 +4,8 @@ Defense in depth only: the hard boundary is the network (workers have no egress,
 In module worker code (anything outside `providers/`, `workers/core/contracts/` and `workers/core/tests/`):
   - no provider SDK, HTTP or socket library, under any alias, and no dynamic import (`__import__`, `importlib`);
   - no import of provider code (`*.providers`), of any `*Provider`, of `AiGateway`, or of private names (`_x`);
-  - no call to any `*Provider` or `AiGateway`, directly, through an alias or through an attribute;
+  - no call to any `*Provider` or `AiGateway`, directly or through an alias, and no reference to them as an
+    attribute at all (so `E = ai.EchoProvider` is caught where the name is taken, not only where it is called);
   - no `ClassifiedPart(...)`: parts come from the loaders `text_part` / `column_part`.
 Usage: python3 scripts/check_ai_boundary.py [root ...]   (default: tenants workers). Exit 1 on any finding.
 """
@@ -57,6 +58,8 @@ def check_file(path: pathlib.Path) -> list[str]:
                 bad(node, f"instantiates {target}; only the framework does")
         elif isinstance(node, ast.Attribute) and node.attr.startswith("_") and not node.attr.startswith("__") and not in_providers:
             bad(node, f"reaches private name {node.attr}")
+        elif isinstance(node, ast.Attribute) and forbidden_name(node.attr) and not in_providers:
+            bad(node, f"references {node.attr}; only the framework holds providers and the gateway")
     return out
 
 

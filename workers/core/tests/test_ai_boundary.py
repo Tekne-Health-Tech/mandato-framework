@@ -11,6 +11,7 @@ BYPASSES = {
     "alias of a provider": "from workers.core.contracts.ai import EchoProvider as E\nE().generate('m.t', [], {})\n",
     "module alias + attribute": "import workers.core.contracts.ai as ai\nai.EchoProvider()\n",
     "sdk under alias": "import openai as o\n",
+    "assignment alias": "import workers.core.contracts.ai as ai\nE = ai.EchoProvider\nE().generate('m.t', [], {})\n",
     "sdk submodule": "from google.genai import types\n",
     "http client": "import httpx\n",
     "dynamic import": "__import__('open' + 'ai')\n",
