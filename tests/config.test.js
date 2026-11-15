@@ -111,3 +111,12 @@ test('re-check 6: a symlink that points outside the tenant is refused', () => {
   const inner = copy((t, d) => { symlinkSync(join(d, 'theme'), join(d, 'theme-inner')); t.theme = 'theme-inner/tokens.json'; });
   assert.deepEqual(loadTenant(inner).errors, []);
 });
+test('final check 6: a module directory symlinked outside the tenant is refused', () => {
+  const outside = mkdtempSync(join(tmpdir(), 'outside-mod-'));
+  cpSync(join(demo, 'modules/hello'), outside, { recursive: true });
+  const dir = copy((t, d) => { cpSync(join(d, 'modules/hello'), join(d, 'hello-moved'), { recursive: true }); });
+  const target = join(dir, 'modules/hello');
+  spawnSync('rm', ['-r', target]);
+  symlinkSync(outside, target);
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('outside the tenant')));
+});

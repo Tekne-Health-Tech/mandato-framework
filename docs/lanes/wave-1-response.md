@@ -24,3 +24,12 @@ Residual, stated in design §7.2: `migrator` is still a member of every module o
 | new, and 1 on existing instances | 2490df6 edited `0001_core.sql`, which is recorded by hash, so an instance built before could neither upgrade nor lose `migrator`'s `core_owner` membership | `0001_core.sql` is back to the version merged on `main`, byte for byte. The change ships as `0002_core.sql`: revoke `core_owner` from `migrator`, `record_migration` with the lease check, `migrator_read`. `mandato bootstrap` applies every core migration not yet recorded, as the superuser, in one transaction that also records it (as `migrator`, under a migration lease). `mandato migrate` refuses a core migration bootstrap has not applied | `run.sh` "upgrade of an instance built before 0002": 0001 only, then `migrate` refuses, `bootstrap` applies 0002, membership gone, `migrate` applies modules, a second run changes nothing |
 | 4 | `key` not caught | the heuristic also covers `key`, `key_*`, `*_key`, `pin`, `signature`, `salt` (public-key fields of `publish_keys` excepted). It stays a lint: the boundary is each connector's `params` schema, which the connector lane delivers with `additionalProperties: false`; the loader validates `params` against it, and `--strict` (production boot) refuses a connector without one | `config.test.js` "re-check 4" |
 | 6 | symlinks escape the root | `inside()` also compares real paths once the target exists | "re-check 6" (outside link refused, inside link accepted) |
+
+## Final check (`wave-1-final-check-codex.md`, at f0fd880): 1 and 4 closed
+
+| # | Finding | Answer |
+| --- | --- | --- |
+| 6 | a module directory symlinked outside the tenant passed | fixed: the module directory itself must resolve inside the tenant. Test `config.test.js` "final check 6" failed before |
+| upgrade | a database that recorded 0001 at the intermediate commit 2490df6 cannot migrate | accepted, not a defect: 2490df6 never reached `main`, and only throwaway test databases were built from it. `0001_core.sql` is byte-identical to `main` again, so every database built from a released commit upgrades through 0002 (test "upgrade of an instance built before 0002") |
+
+Stopping rule: the review loop ends here. The last fix (item 6) is covered by its test and CI; the next wave's review reads it.

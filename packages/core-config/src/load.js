@@ -71,6 +71,8 @@ export function loadTenant(dir, { strict = false } = {}) {
       continue;
     }
     const modDir = join(dir, 'modules', name);
+    // the module directory itself must be inside the tenant (a symlinked module directory is the module's root)
+    if (existsSync(modDir) && !inside(dir, join('modules', name))) { errors.push(`module ${m.id}: modules/${name} is outside the tenant`); continue; }
     const [manifest, manErr] = json(modDir, 'mandato.module.json', `module ${m.id}:`);
     if (manErr) { errors.push(manErr); continue; }
     if (!schemas.module(manifest)) { errors.push(...fmt(`module ${m.id}`, schemas.module.errors)); continue; }
