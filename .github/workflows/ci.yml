@@ -15,6 +15,19 @@ jobs:
       - uses: actions/checkout@v4
       - run: scripts/check-boundaries.sh
 
+  contracts:
+    name: Contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+
   secrets:
     name: Secret scan
     runs-on: ubuntu-latest

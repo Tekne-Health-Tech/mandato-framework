@@ -1,0 +1,36 @@
+{
+  "projection": "municipalities",
+  "version": 1,
+  "source": "core.municipality",
+  "where": "true",
+  "fields": {
+    "id": {
+      "expr": "municipality.ibge_code",
+      "class": "C0"
+    },
+    "updated_at": {
+      "expr": "municipality.updated_at",
+      "class": "C0"
+    },
+    "name": {
+      "expr": "municipality.name",
+      "class": "C0"
+    },
+    "uf": {
+      "expr": "municipality.uf",
+      "class": "C0"
+    },
+    "health_region": {
+      "expr": "municipality.health_region",
+      "class": "C0"
+    },
+    "population": {
+      "expr": "municipality.population",
+      "class": "C0"
+    },
+    "population_ref_date": {
+      "expr": "municipality.population_ref_date",
+      "class": "C0"
+    }
+  }
+}

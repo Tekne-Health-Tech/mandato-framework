@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mandato:schema:projection:municipalities:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "updated_at",
+    "name",
+    "uf",
+    "health_region",
+    "population",
+    "population_ref_date"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "name": {
+      "type": "string"
+    },
+    "uf": {
+      "type": "string",
+      "pattern": "^[A-Z]{2}$"
+    },
+    "health_region": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "population": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "population_ref_date": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date"
+    }
+  }
+}

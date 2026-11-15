@@ -1,0 +1,53 @@
+{
+  "projection": "content",
+  "version": 1,
+  "source": "core.content_item",
+  "where": "content_item.state = 'published' and content_item.deleted_at is null",
+  "fields": {
+    "id": {
+      "expr": "content_item.id",
+      "class": "C0"
+    },
+    "updated_at": {
+      "expr": "greatest(content_item.updated_at, v.updated_at)",
+      "class": "C0"
+    },
+    "type": {
+      "expr": "content_item.type",
+      "class": "C0"
+    },
+    "published_at": {
+      "expr": "content_item.published_at",
+      "class": "C0"
+    },
+    "title": {
+      "expr": "v.title",
+      "class": "C0"
+    },
+    "summary": {
+      "expr": "v.summary",
+      "class": "C0"
+    },
+    "body_md": {
+      "expr": "v.body_md",
+      "class": "C0"
+    },
+    "figures": {
+      "expr": "v.figures",
+      "class": "C0"
+    },
+    "causes": {
+      "expr": "array(select cause_slug from core.content_cause where content_id = content_item.id)",
+      "class": "C0"
+    },
+    "media": {
+      "expr": "core.publish_media(content_item.id)",
+      "class": "C0"
+    },
+    "ai_label": {
+      "expr": "v.ai_provenance_id is not null",
+      "class": "C0"
+    }
+  },
+  "join": "core.content_version v on v.content_id = content_item.id and v.n = content_item.published_version"
+}

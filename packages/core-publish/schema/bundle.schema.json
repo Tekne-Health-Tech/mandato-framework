@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mandato:schema:manifest:1",
+  "title": "Published manifest.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "instance", "generation", "min_generation", "min_app_version", "generated_at", "expires_at", "bundles", "takedowns", "sig"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "instance": { "type": "string", "pattern": "^[a-z][a-z0-9-]{1,30}$" },
+    "generation": { "type": "integer", "minimum": 1 },
+    "min_generation": { "type": "integer", "minimum": 0 },
+    "min_app_version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "url", "sha256", "bytes", "count"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^([a-z0-9]+\\.)?[a-z][a-z0-9-]*$" },
+          "url": { "type": "string", "pattern": "^b/[0-9a-f]{64}\\.json$" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "takedowns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "id", "at"],
+        "properties": { "kind": { "type": "string" }, "id": { "type": "string" }, "at": { "type": "string", "format": "date-time" } }
+      }
+    },
+    "keyring_update": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "add_next": { "type": "object", "required": ["key_id", "public_key"], "properties": { "key_id": { "type": "string" }, "public_key": { "type": "string" } } },
+        "revoke": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "sig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key_id", "alg", "value"],
+      "properties": {
+        "key_id": { "type": "string" },
+        "alg": { "const": "Ed25519" },
+        "value": { "type": "string", "pattern": "^[A-Za-z0-9_-]{86}$" }
+      }
+    }
+  }
+}

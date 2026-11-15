@@ -1,0 +1,39 @@
+# Fictitious showcase mandate. Synthetic data only.
+schema_version: 1
+instance:
+  slug: demo
+  display_name: "Mandato Dep. Exemplo"
+  house: { name: "Assembleia Legislativa do Estado Exemplo", acronym: "ALEX", uf: "EX" }
+  office: deputado_estadual
+parliamentarian:
+  public_name: "Dep. Exemplo"
+  pronoun_style: neutral
+locale: pt-BR
+timezone: America/Fortaleza
+causes:
+  - { slug: saude, name: "Saúde", icon: stethoscope }
+  - { slug: educacao, name: "Educação", icon: book }
+  - { slug: fiscalizacao, name: "Fiscalização", icon: search }
+theme: theme/tokens.json
+labels:
+  ai_assisted: "Texto produzido com apoio de IA e revisado pela equipe."
+legal:
+  privacy_policy_url: https://example.org/privacidade
+  data_controller: "Gabinete do Dep. Exemplo"
+  dpo: { name: "Encarregado Exemplo", email: dpo@example.org }
+channels:
+  email: contato@example.org
+  telegram_channel: null
+  whatsapp_channel_url: null
+connectors:
+  - { source_id: ibge-municipios, schedule: "0 6 1 * *", params: { uf: EX } }
+modules:
+  - { id: core.content }
+  - { id: core.agenda }
+  - { id: demo.hello, settings: { greeting: "Olá" } }
+publish_keys:
+  # Derived from a fixed public seed for tests (tests/vectors). Never use for a real instance.
+  - { key_id: "demo-test", role: current, public_key: "ed25519:1teuSwblOlj2qKzJr6iCHBQsq6gOdSJbO0ThS_fGOdk" }
+ai:
+  providers:
+    - { id: echo, locality: local, max_data_class: C3, egress: [] }

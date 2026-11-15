@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mandato:schema:projection:agenda:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "updated_at",
+    "starts_at",
+    "ends_at",
+    "title",
+    "kind",
+    "municipality_ibge",
+    "place"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "starts_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ends_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "title": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string"
+    },
+    "municipality_ibge": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{7}$"
+    },
+    "place": {
+      "type": "string"
+    }
+  }
+}

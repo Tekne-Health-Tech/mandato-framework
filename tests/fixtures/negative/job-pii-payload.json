@@ -1,0 +1,7 @@
+{
+  "queue": "hello.greet",
+  "data_class": "C1",
+  "payload": {
+    "pii_email": "x@example.org"
+  }
+}

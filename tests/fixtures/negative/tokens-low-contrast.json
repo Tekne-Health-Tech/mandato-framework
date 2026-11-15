@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "color": {
+    "light": {
+      "brand": "#1F3A5F",
+      "brand-on": "#FFFFFF",
+      "accent": "#B8860B",
+      "link": "#1B4FA0",
+      "cta": "#1B4FA0",
+      "cta-on": "#FFFFFF",
+      "bg": "#FFFFFF",
+      "surface": "#F5F6F8",
+      "fg": "#1A1D21",
+      "muted": "#C8CCD2",
+      "line": "#8A9099",
+      "success": "#2E7D32",
+      "warning": "#8A6100",
+      "error": "#B3261E",
+      "info": "#1B4FA0"
+    },
+    "dark": {
+      "brand": "#9CB8DB",
+      "brand-on": "#0E1620",
+      "accent": "#E0B44C",
+      "link": "#8AB4F8",
+      "cta": "#8AB4F8",
+      "cta-on": "#0E1620",
+      "bg": "#121417",
+      "surface": "#1C1F24",
+      "fg": "#ECEEF1",
+      "muted": "#AEB4BC",
+      "line": "#6B727B",
+      "success": "#81C784",
+      "warning": "#E0B44C",
+      "error": "#F28B82",
+      "info": "#8AB4F8"
+    }
+  },
+  "typography": {
+    "display": {
+      "family": "system-ui"
+    },
+    "body": {
+      "family": "system-ui"
+    },
+    "scale": [
+      12,
+      14,
+      16,
+      20,
+      24,
+      32
+    ]
+  },
+  "radius": [
+    0,
+    4,
+    8,
+    16
+  ],
+  "spacing": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    24,
+    32
+  ]
+}
