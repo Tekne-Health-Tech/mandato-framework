@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "email": [
+    { "in": "  Maria.Silva@Example.ORG ", "out": "maria.silva@example.org" },
+    { "in": "JOÃO@example.org", "out": "joão@example.org" },
+    { "in": "joão@example.org", "out": "joão@example.org" },
+    { "in": "ｍａｒｉａ@example.org", "out": "maria@example.org" },
+    { "in": "ΟΔΟΣ@example.org", "out": "οδος@example.org" },
+    { "in": "x@xn--caf-dma.example", "out": "x@xn--caf-dma.example" },
+    { "in": "x@café.example", "error": "non-ascii-domain" },
+    { "in": "no-at-sign", "error": "invalid" },
+    { "in": "a@b@c.org", "error": "invalid" }
+  ],
+  "phone": [
+    { "in": "(85) 99999-1234", "out": "+5585999991234" },
+    { "in": "85 3333-1234", "out": "+558533331234" },
+    { "in": "+55 85 99999-1234", "out": "+5585999991234" },
+    { "in": "5585999991234", "out": "+5585999991234" },
+    { "in": "+1 202 555 0100", "out": "+12025550100" },
+    { "in": "12345", "error": "invalid" }
+  ]
+}

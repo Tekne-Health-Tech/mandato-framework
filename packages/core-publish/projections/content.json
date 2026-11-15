@@ -37,7 +37,7 @@
       "class": "C0"
     },
     "causes": {
-      "expr": "array(select cause_slug from core.content_cause where content_id = content_item.id)",
+      "expr": "array(select cause_slug from core.content_cause where content_id = content_item.id order by cause_slug)",
       "class": "C0"
     },
     "media": {

@@ -1,0 +1,36 @@
+{
+  "seed_note": "sha256('mandato-demo-publish-key-TEST-ONLY') — test only",
+  "public_key": "ed25519:1teuSwblOlj2qKzJr6iCHBQsq6gOdSJbO0ThS_fGOdk",
+  "canonical": "{\"bundles\":[{\"bytes\":1234,\"count\":2,\"name\":\"content-2026-11\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"url\":\"b/3333333333333333333333333333333333333333333333333333333333333333.json\"}],\"expires_at\":\"2026-11-22T09:00:00-03:00\",\"generated_at\":\"2026-11-15T09:00:00-03:00\",\"generation\":42,\"instance\":\"demo\",\"min_app_version\":\"1.0.0\",\"min_generation\":30,\"note_unicode\":\"Ação €  😀\",\"schema_version\":1,\"takedowns\":[{\"at\":\"2026-11-10T09:00:00-03:00\",\"id\":\"00000000-0000-7000-8000-0000000000c9\",\"kind\":\"content\"}]}",
+  "signed": {
+    "schema_version": 1,
+    "instance": "demo",
+    "generation": 42,
+    "min_generation": 30,
+    "min_app_version": "1.0.0",
+    "generated_at": "2026-11-15T09:00:00-03:00",
+    "expires_at": "2026-11-22T09:00:00-03:00",
+    "bundles": [
+      {
+        "name": "content-2026-11",
+        "url": "b/3333333333333333333333333333333333333333333333333333333333333333.json",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "bytes": 1234,
+        "count": 2
+      }
+    ],
+    "takedowns": [
+      {
+        "kind": "content",
+        "id": "00000000-0000-7000-8000-0000000000c9",
+        "at": "2026-11-10T09:00:00-03:00"
+      }
+    ],
+    "note_unicode": "Ação €  😀",
+    "sig": {
+      "key_id": "demo-test",
+      "alg": "Ed25519",
+      "value": "QoeyM12ND4IMHBKfMIOnvG_-c0uNdm3gc0ZCL9KzY2PebF-uveCmVFc_gbnf4Ml8Rq0kiRkgeB2cvNbWuGsjAA"
+    }
+  }
+}

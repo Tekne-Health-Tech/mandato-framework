@@ -117,8 +117,8 @@ Every column has `COMMENT ON COLUMN … IS 'class=Cn'` exactly as in Appendix A.
 - **Blind indexes**: `bi_<col> = version (1 byte) | HMAC-SHA256(index_key[version], normalize_v[version](value))`.
   - The index key and the normalization version travel together. Rotation uses dual write (`bi_<col>` and `bi_<col>_next`, both unique), a backfill under a lock on new registrations, a switch of lookups, then removal of the old column.
   - Normalization v1:
-    - E-mail: Unicode NFKC, then the local part case-folded, then the domain converted with IDNA 2008 UTS #46 and lowercased.
-    - Phone: E.164 using the instance's country default.
+    - E-mail: trim, Unicode NFKC, then the Unicode default lowercase mapping (identical in JavaScript `toLowerCase` and Python `lower`; full case folding is not used because JavaScript lacks it). Domains must be ASCII; internationalized domains are accepted only in their `xn--` form, and anything else is rejected. (Implementation 0.1.1 narrowed the original IDNA rule to keep both languages byte-identical.)
+    - Phone: E.164; numbers without `+` are read as Brazilian (10–11 national digits, or 12–13 starting with 55).
   - Shared byte-level test vectors in `packages/crypto/vectors/normalize-v1.json` must pass in both TypeScript and Python.
 - RLS predicates never use `pii_` values.
 
@@ -198,6 +198,7 @@ Every projection has a JSON Schema in `packages/core-publish/projections/<name>.
 - The declassification act is the transition to `published` (content) or to `visibility = 'public'` (agenda). It requires the `core.content.publish` permission, a different approver than the author for content, and it writes an audit event naming the projection version.
 - The bundle writer validates every record again against the projection's JSON Schema before upload, and refuses unknown fields.
 - Module publish targets cannot build records (§7.6). They hand over projection names and ids; the core runs the projection.
+- The core runs projections as `worker_c1`, so the database refuses any C2+ column even if a projection were mislabelled. `media[]` comes from `core.publish_media(content_id)` (security invoker). `tenants/demo/published/` is built this way by `scripts/publish-demo.sh` and CI checks that it is reproducible.
 
 ### 6.3 Manifest and bundles (`packages/core-publish/schema/bundle.schema.json`)
 
@@ -483,7 +484,7 @@ Artifacts, all in this repository:
 - `packages/core-contracts/src/*.ts` and `workers/core/contracts/*.py` as in §7, compiling, with no implementation beyond `NoneRouter`, `NoneProvider` and `EchoProvider`.
 - `docs/api-conventions.md` (§9).
 - `packages/db/grants.md` (generated grant matrix), `packages/core-publish/projections/*.json` with their schemas, and the shared test vectors in `packages/crypto/vectors/` and `packages/core-publish/vectors/`.
-- The nine implementation tests in `egm/0001/stage6-cross-provider-codex-v4.md`.
+- The nine implementation tests in `egm/0001/stage6-cross-provider-codex-v4.md`; where each one runs, or which lane owns it, is in `egm/0001/implementation-tests.md`.
 - Adversarial SQL tests: self-grant, `aal1` reads, cross-pool column reads, audit writes without a lease, reuse of a lease after commit, and rewriting `audit.migration_log`.
 - Fixtures in `tenants/demo/`: valid `tenant.yaml`, neutral `theme/tokens.json`, seed with 4 staff users (one per framework role), 6 content items covering every state, 4 agenda events, 3 municipalities; a published `manifest.json` with two partitions, one takedown and one tombstoned record; `demo.hello` module with a route, a screen and a job. Synthetic data only.
 - Negative fixtures that CI must reject: a `tenant.yaml` with an unknown key, a token set failing contrast, a migration with an unclassified column, a publish attempt including a `pii_` column.

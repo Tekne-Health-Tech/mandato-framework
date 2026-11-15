@@ -564,6 +564,16 @@ begin
   return query select v_job.id, v_job.queue, v_job.payload, encode(v_token, 'hex');
 end $$;
 
+-- ---------------------------------------------------------------- publish (§6.2, §6.3)
+-- Media references for the content projection. SECURITY INVOKER: it reads through the caller's grants and RLS.
+create function core.publish_media(p_content uuid) returns jsonb language sql stable
+set search_path = pg_catalog, core, pg_temp as $$
+  select coalesce(jsonb_agg(jsonb_build_object('url', 'm/' || a.sha256, 'width', a.width, 'height', a.height,
+                                               'sha256', a.sha256, 'bytes', a.bytes) order by cm.position, a.id), '[]')
+    from core.content_media cm join core.media_asset a on a.id = cm.media_id
+   where cm.content_id = p_content and a.deleted_at is null and a.exif_stripped
+$$;
+
 -- function ownership and execute rights
 do $$
 declare r record;
@@ -578,6 +588,7 @@ grant execute on function core.uuid7(), core.is_aal2(), core.has_role(text), cor
   to api_rt, worker_c1, worker_c2, worker_c3;
 grant execute on function core.uuid7() to audit_owner, core_owner, migrator;
 grant execute on function core.grant_role(uuid, text), core.revoke_role(uuid) to api_rt;
+grant execute on function core.publish_media(uuid) to worker_c1;
 grant execute on function core.claim_job(text[], text), audit.bind_lease(text) to worker_c1, worker_c2, worker_c3;
 grant execute on function audit.bind_migration(text, text), audit.record_migration(text, text, text) to migrator;
 grant execute on function audit.write(text, text, text, jsonb), audit.row_trigger() to api_rt, worker_c1, worker_c2, worker_c3, migrator, core_owner;

@@ -27,6 +27,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - name: TypeScript contracts compile
+        run: npx tsc -p .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python worker contracts
+        run: python -m unittest discover -s workers -t . -v
 
   database:
     name: Database contract (0001)
@@ -44,10 +51,18 @@ jobs:
       PGUSER: postgres
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Adversarial tests
         run: packages/db/test/run.sh
       - name: Grant matrix is up to date
         run: packages/db/test/grants.sh > /tmp/grants.md && diff -u packages/db/grants.md /tmp/grants.md
+      - name: Demo publication is reproducible from the seed
+        run: scripts/publish-demo.sh /tmp/published && diff -r tenants/demo/published /tmp/published
 
   secrets:
     name: Secret scan

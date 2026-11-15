@@ -82,6 +82,7 @@
 | worker_c1 | core.job (state) | SELECT, UPDATE |
 | worker_c1 | core.media_asset | SELECT |
 | worker_c1 | core.municipality | SELECT |
+| worker_c1 | core.publish_media(p_content uuid) | EXECUTE |
 | worker_c1 | core.touch_updated_at() | EXECUTE |
 | worker_c1 | core.uuid7() | EXECUTE |
 | worker_c2 | audit.bind_lease(p_token text) | EXECUTE |

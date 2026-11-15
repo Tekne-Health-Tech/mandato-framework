@@ -23,7 +23,9 @@ $PSQL -U postgres -d "$DB" -f ../migrations/0001_core.sql >/dev/null 2>&1 || { e
 $PSQL -U postgres -d "$DB" -f seed-test.sql >/dev/null || { echo "seed failed"; exit 1; }
 
 echo "# structure"
-equals "every core/audit column has a class comment" 0 sup "select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and c.relkind in ('r','u') and a.attnum>0 and not a.attisdropped and coalesce(col_description(c.oid,a.attnum),'') !~ '^class=C[0-3]\$'"
+UNCLASSIFIED="select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where (n.nspname in ('core','audit') or n.nspname like 'mod\\_%') and c.relkind in ('r','u') and a.attnum>0 and not a.attisdropped and coalesce(col_description(c.oid,a.attnum),'') !~ '^class=C[0-3]\$'"
+equals "every core/audit/module column has a class comment" 0 sup "$UNCLASSIFIED"
+equals "negative fixture: an unclassified module column is caught" 1 sup "begin; $(cat fixtures/unclassified-column.sql) $UNCLASSIFIED; rollback"
 equals "prefixed columns meet their minimum class" 0 sup "select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and a.attnum>0 and ((a.attname like 'pii\\_%' and col_description(c.oid,a.attnum) < 'class=C2') or (a.attname ~ '^(phi|piim|enc)_' and col_description(c.oid,a.attnum) <> 'class=C3'))"
 equals "C2+ columns carry a prefix" 0 sup "select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and a.attnum>0 and col_description(c.oid,a.attnum) in ('class=C2','class=C3') and a.attname !~ '^(pii|phi|piim|enc)_'"
 equals "RLS enabled and forced on every table" 0 sup "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and c.relkind in ('r','u') and not (c.relrowsecurity and c.relforcerowsecurity)"
@@ -71,6 +73,17 @@ equals "worker audit actor is the job" "worker_c1|worker|00000000-0000-7000-8000
 fails "set_config app.actor is ignored" as worker_c1 '{}' "select set_config('app.actor','system:retention',true); select audit.write('test','core.job',null,'{}')"
 fails "worker_c1 cannot read pii_email" as worker_c1 '{}' "select pii_email from core.app_user"
 fails "worker_c2 cannot claim a C1 job" bash -c "out=\$($PSQL -U worker_c2 -d $DB -c \"select count(*) from core.claim_job(array['hello.greet'],'w2')\"); [ \"\$out\" = 1 ] && echo claimed || exit 1"
+
+echo "# audit actor for every runtime login (stage 6, test 1)"
+for n in 2 3; do
+  T=$($PSQL -U worker_c$n -d "$DB" -c "select lease_token from core.claim_job(array['test.c$n'],'w$n')" | tail -1)
+  ok "worker_c$n writes with its own lease" as worker_c$n '{}' "select audit.bind_lease('$T'); select audit.write('actor-c$n','core.job',null,'{}')"
+  equals "worker_c$n audit actor is its job" "worker_c$n|worker|00000000-0000-7000-8000-0000000000f$n" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where action='actor-c$n'"
+done
+ok "migrator writes under a migration lease" as migrator '{}' "select audit.bind_migration('core','0001_core.sql'); select audit.write('actor-mig','audit.migration_log',null,'{}')"
+equals "migrator audit actor is the migration" "migrator|migration|core:0001_core.sql" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where action='actor-mig'"
+equals "no audit event ever records a definer role" 0 sup "select count(*) from audit.event where db_role in ('audit_owner','core_owner','postgres')"
+fails "migrator cannot use a worker lease kind" as migrator '{}' "select audit.write('x','core.job',null,'{}')"
 
 echo "# migrations"
 fails "migrator cannot rewrite migration_log" as migrator '{}' "update audit.migration_log set sha256='x'"

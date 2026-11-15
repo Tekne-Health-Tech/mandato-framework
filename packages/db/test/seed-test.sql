@@ -19,5 +19,7 @@ insert into core.content_item (id, type, state, author_id) values
 insert into core.content_version (content_id, n, title, created_by) values
   ('00000000-0000-7000-8000-0000000000c1', 1, 'Notícia de teste', '00000000-0000-7000-8000-000000000002');
 insert into core.job (id, queue, data_class, payload) values
-  ('00000000-0000-7000-8000-0000000000f1', 'hello.greet', 'C1', '{}');
+  ('00000000-0000-7000-8000-0000000000f1', 'hello.greet', 'C1', '{}'),
+  ('00000000-0000-7000-8000-0000000000f2', 'test.c2',     'C2', '{}'),
+  ('00000000-0000-7000-8000-0000000000f3', 'test.c3',     'C3', '{}');
 set session_replication_role = origin;
