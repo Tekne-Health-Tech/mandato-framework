@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toCss } from '../packages/core-theme/src/css.js';
@@ -43,4 +43,27 @@ test('CLI output is byte-identical across runs', () => {
   for (const file of ['theme.css', 'theme.native.json']) {
     assert.deepEqual(readFileSync(join(outputs[0], file)), readFileSync(join(outputs[1], file)));
   }
+});
+
+test('CLI refuses font values that could break out of CSS', () => {
+  const out = mkdtempSync(join(tmpdir(), 'mandato-theme-inject-'));
+  const cases = [
+    ['body', { family: 'x; } body { display: none } :root {' }],
+    ['display', { family: 'system-ui', file: '../../etc/passwd.woff2' }],
+    ['display', { family: 'system-ui', file: '/abs/font.woff2' }],
+  ];
+  for (const [role, value] of cases) {
+    const bad = structuredClone(tokens);
+    bad.typography[role] = value;
+    const path = join(out, `${role}.json`);
+    writeFileSync(path, JSON.stringify(bad));
+    const errors = [];
+    assert.equal(run([path, join(out, 'build')], (message) => errors.push(message)), 1, JSON.stringify(value));
+    assert.match(errors.join('\n'), /schema validation failed/);
+  }
+  const ok = structuredClone(tokens);
+  ok.typography.display = { family: '"Inter", system-ui, sans-serif', file: 'fonts/inter-var.woff2' };
+  const path = join(out, 'ok.json');
+  writeFileSync(path, JSON.stringify(ok));
+  assert.equal(run([path, join(out, 'build')]), 0);
 });

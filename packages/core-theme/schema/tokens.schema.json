@@ -18,8 +18,8 @@
       "additionalProperties": false,
       "required": ["display", "body", "scale"],
       "properties": {
-        "display": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "type": "string" }, "file": { "type": "string" } } },
-        "body": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "type": "string" } } },
+        "display": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "$ref": "#/$defs/family" }, "file": { "$ref": "#/$defs/font_file" } } },
+        "body": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "$ref": "#/$defs/family" } } },
         "scale": { "type": "array", "minItems": 4, "items": { "type": "number", "minimum": 10, "maximum": 64 } }
       }
     },
@@ -27,6 +27,8 @@
     "spacing": { "type": "array", "items": { "type": "number", "minimum": 0 } }
   },
   "$defs": {
+    "family": { "type": "string", "pattern": "^[A-Za-z0-9 ,'\"-]{1,200}$" },
+    "font_file": { "type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9_-][A-Za-z0-9._/-]*\\.(woff2|woff|ttf|otf)$" },
     "hex": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
     "palette": {
       "type": "object",
