@@ -27,6 +27,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - name: Demo tenant is valid (mandato validate)
+        run: pnpm mandato validate tenants/demo
       - name: TypeScript contracts compile
         run: npx tsc -p .
       - uses: actions/setup-python@v5

@@ -27,10 +27,10 @@ SQL
 $PSQL -U postgres -d "$DB" -f supabase-shim.sql >/dev/null || { echo "shim failed"; exit 1; }
 $PSQL -U postgres -d "$DB" -f ../migrations/0001_core.sql >/dev/null 2>&1 || { echo "migration failed"; exit 1; }
 $PSQL -U postgres -d "$DB" -f seed-test.sql >/dev/null || { echo "seed failed"; exit 1; }
-# The demo module's migration, applied the way `mandato migrate` will: own schema and NOLOGIN owner role (§7.2).
-$PSQL -U postgres -d "$DB" -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='mod_hello_owner') then create role mod_hello_owner nologin; end if; end \$\$;
-  create schema mod_hello authorization mod_hello_owner;" >/dev/null || { echo "module schema failed"; exit 1; }
-(echo "set role mod_hello_owner;"; cat ../../../tenants/demo/modules/hello/db/migrations/*.sql) | $PSQL -U postgres -d "$DB" >/dev/null || { echo "demo.hello migration failed"; exit 1; }
+# The demo module's migration, applied by the real runner: bootstrap (owner role, schema) then migrate as migrator.
+ROOT=$(cd ../../.. && pwd)
+node "$ROOT/packages/core-config/bin/mandato.js" bootstrap "$ROOT/tenants/demo" "$DB" >/dev/null || { echo "mandato bootstrap failed"; exit 1; }
+node "$ROOT/packages/core-config/bin/mandato.js" migrate "$ROOT/tenants/demo" "$DB" >/dev/null || { echo "mandato migrate failed"; exit 1; }
 
 echo "# structure"
 UNCLASSIFIED="select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where (n.nspname in ('core','audit') or n.nspname like 'mod\\_%') and c.relkind in ('r','u') and a.attnum>0 and not a.attisdropped and coalesce(col_description(c.oid,a.attnum),'') !~ '^class=C[0-3]\$'"
@@ -141,8 +141,10 @@ fails "migrator cannot use a worker lease kind" as migrator '{}' "select audit.w
 
 echo "# migrations"
 fails "migrator cannot rewrite migration_log" as migrator '{}' "update audit.migration_log set sha256='x'"
-ok "migrator records a migration" as migrator '{}' "select audit.record_migration('core','0001_core.sql','abc')"
-fails "migrator acting as core_owner cannot rewrite migration_log" as migrator '{}' "set role core_owner; delete from audit.migration_log"
+ok "migrator records the migration bound to its transaction" as migrator '{}' "select audit.bind_migration('test.record','test-record'); select audit.record_migration('test.record','test-record','abc')"
+fails "migrator cannot record a migration without its lease" as migrator '{}' "select audit.record_migration('core','test-unbound','abc')"
+fails "migrator cannot record a migration other than the bound one" as migrator '{}' "select audit.bind_migration('core','test-a'); select audit.record_migration('demo.hello','0099_fake.sql','abc')"
+equals "migrator is a member of no core or audit owner role" 0 sup "select count(*) from pg_auth_members m where m.member='migrator'::regrole and m.roleid::regrole::text in ('core_owner','audit_owner','audit_archiver')"
 
 echo "# projections are checked against the column classes by the database itself (§6.2)"
 # projection_check may read exactly the columns whose class comment is C0 or C1 and that carry no C2+ prefix.
@@ -151,7 +153,6 @@ echo "# projections are checked against the column classes by the database itsel
 sup "do \$\$ begin if not exists (select 1 from pg_roles where rolname='projection_check') then create role projection_check nologin; end if; end \$\$;
      grant usage on schema core to projection_check; grant execute on function core.publish_media(uuid) to projection_check;" >/dev/null
 sup "select format('grant select (%I) on core.%I to projection_check', a.attname, c.relname) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='core' and c.relkind='r' and a.attnum>0 and not a.attisdropped and col_description(c.oid,a.attnum) in ('class=C0','class=C1') and a.attname !~ '^(pii|phi|piim|enc)_'" | while read -r g; do sup "$g" >/dev/null; done
-ROOT=$(cd ../../.. && pwd)
 for f in "$ROOT"/packages/core-publish/projections/*.json; do
   case $f in *.schema.json) continue;; esac
   ok "projection $(basename "$f" .json) reads only C0/C1 columns" sup "begin; set local role projection_check; explain $(node "$ROOT/scripts/publish-demo.js" sql-unchecked "$f"); rollback"
@@ -159,6 +160,47 @@ done
 for f in projection-pii projection-whole-row; do
   fails "negative fixture: $f is refused by the database" sup "begin; set local role projection_check; explain $(node "$ROOT/scripts/publish-demo.js" sql-unchecked "$ROOT/tests/fixtures/negative/$f.json"); rollback"
 done
+
+echo "# a module migration that leaves its owner role reaches nothing in core or audit (§7.2, database-enforced)"
+# These run the runner's transaction by hand, so the static screen is not in the way: the database is the boundary.
+MIG="select audit.bind_migration('demo.hello','escape-test'); set local role mod_hello_owner; set local search_path = mod_hello, pg_temp"
+fails "set_config('role','core_owner') from a module migration" as migrator '{}' "$MIG; select set_config('role','core_owner',true)"
+fails "after RESET ROLE a module migration cannot create in core" as migrator '{}' "$MIG; reset role; create table core.escaped(id int)"
+fails "after RESET ROLE a module migration cannot record another migration" as migrator '{}' "$MIG; reset role; select audit.record_migration('demo.hello','0099_fake.sql','abc')"
+equals "nothing escaped into core" 0 sup "select count(*) from pg_class where relname = 'escaped'"
+
+echo "# migration runner (§7.2)"
+MANDATO="node $ROOT/packages/core-config/bin/mandato.js"
+equals "migrate is idempotent" "migrate: up to date" bash -c "$MANDATO migrate $ROOT/tenants/demo $DB"
+equals "core and module migrations are recorded with hashes" 2 sup "select count(*) from audit.migration_log where (module_id, migration_id) in (('core','0001_core.sql'),('demo.hello','0001_hello.sql')) and sha256 ~ '^[0-9a-f]{64}\$'"
+equals "the module migration ran as its owner role" mod_hello_owner sup "select pg_get_userbyid(relowner) from pg_class where oid = 'mod_hello.greeting_log'::regclass"
+equals "migration actor in the audit trail is the migration" 0 sup "select count(*) from audit.event where db_role = 'migrator' and actor_kind <> 'migration'"
+TMPT=$(mktemp -d); cp -r "$ROOT/tenants/demo/." "$TMPT/"; echo "-- edited after apply" >> "$TMPT/modules/hello/db/migrations/0001_hello.sql"
+fails "an applied migration that changed aborts" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
+cp "$ROOT/tenants/demo/modules/hello/db/migrations/0001_hello.sql" "$TMPT/modules/hello/db/migrations/0001_hello.sql"
+printf 'create function mod_hello.f() returns int language sql security definer as $f$ select 1 $f$;\n' > "$TMPT/modules/hello/db/migrations/0002_bad.sql"
+fails "a module migration with SECURITY DEFINER is rejected" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
+equals "the rejected migration left nothing behind" 0 sup "select count(*) from pg_proc where proname = 'f' and pronamespace = 'mod_hello'::regnamespace"
+MARK=$(mktemp -u); printf 'create table t_meta(id int);
+\\! touch %s
+' "$MARK" > "$TMPT/modules/hello/db/migrations/0002_bad.sql"
+fails "a psql backslash command in a migration is not executed" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
+equals "the backslash command did not run" no bash -c "[ -e $MARK ] && echo yes || echo no"
+rm -f "$TMPT/modules/hello/db/migrations/0002_bad.sql" "$TMPT/modules/hello/db/migrations/0001_hello.sql"
+fails "an applied migration whose file was deleted aborts" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
+rm -rf "$TMPT"
+
+echo "# upgrade of an instance built before 0002 (forward migration, never an edit of 0001)"
+UPG=${DB}_upgrade
+psql -X -q -U postgres -d postgres -c "drop database if exists $UPG" -c "create database $UPG" >/dev/null
+$PSQL -U postgres -d "$UPG" -f supabase-shim.sql >/dev/null && $PSQL -U postgres -d "$UPG" -f ../migrations/0001_core.sql >/dev/null 2>&1
+equals "before the upgrade migrator is a member of core_owner (0001 as merged)" 1 bash -c "$PSQL -U postgres -d $UPG -c \"select count(*) from pg_auth_members where member='migrator'::regrole and roleid='core_owner'::regrole\""
+fails "migrate refuses a core migration that bootstrap has not applied" bash -c "$MANDATO migrate $ROOT/tenants/demo $UPG 2>&1"
+ok "bootstrap applies 0002 to the existing instance" bash -c "$MANDATO bootstrap $ROOT/tenants/demo $UPG 2>&1"
+equals "after the upgrade migrator is a member of no core owner role" 0 bash -c "$PSQL -U postgres -d $UPG -c \"select count(*) from pg_auth_members where member='migrator'::regrole and roleid::regrole::text in ('core_owner','audit_owner','audit_archiver')\""
+ok "migrate then applies the module migrations" bash -c "$MANDATO migrate $ROOT/tenants/demo $UPG 2>&1"
+equals "a second bootstrap and migrate change nothing" "migrate: up to date" bash -c "$MANDATO bootstrap $ROOT/tenants/demo $UPG >/dev/null && $MANDATO migrate $ROOT/tenants/demo $UPG"
+psql -X -q -U postgres -d postgres -c "drop database if exists $UPG" >/dev/null
 
 echo "# summary: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
