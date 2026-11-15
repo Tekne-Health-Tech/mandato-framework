@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# Applies 0001 to a fresh database and runs the adversarial checks of design 0001 §4 and §11.
+# Usage: PGHOST=... PGPORT=... packages/db/test/run.sh
+set -uo pipefail
+cd "$(dirname "$0")"
+DB=${TEST_DB:-mandato_test}
+PSQL="psql -X -q -v ON_ERROR_STOP=1 -At"
+CHIEF=00000000-0000-7000-8000-000000000001; COMM=00000000-0000-7000-8000-000000000002
+PARL=00000000-0000-7000-8000-000000000003; REMOVED=00000000-0000-7000-8000-000000000005; NEWU=00000000-0000-7000-8000-000000000006
+pass=0; fail=0
+claims() { printf '{"sub":"%s","aal":"%s"}' "$1" "$2"; }
+# as ROLE CLAIMS SQL -> runs SQL in one transaction as login ROLE with JWT claims
+as() { local role=$1 cl=$2; shift 2
+  $PSQL -U "$role" -d "$DB" -c "begin; select set_config('request.jwt.claims', '$cl', true); $*; commit;" 2>&1; }
+ok()   { local name=$1; shift; if out=$("$@"); then pass=$((pass+1)); echo "ok   - $name"; else fail=$((fail+1)); echo "FAIL - $name: $out"; fi; }
+fails(){ local name=$1; shift; if out=$("$@"); then fail=$((fail+1)); echo "FAIL - $name (expected an error): $out"; else pass=$((pass+1)); echo "ok   - $name"; fi; }
+equals(){ local name=$1 want=$2; shift 2; out=$("$@" | tail -1); if [ "$out" = "$want" ]; then pass=$((pass+1)); echo "ok   - $name"; else fail=$((fail+1)); echo "FAIL - $name: got '$out', want '$want'"; fi; }
+sup() { $PSQL -U postgres -d "$DB" -c "$*" 2>&1; }
+
+psql -X -q -U postgres -d postgres -c "drop database if exists $DB" -c "create database $DB" >/dev/null
+# A runtime role that already exists with dangerous attributes must come out of the migration hardened (§4.1).
+psql -X -q -U postgres -d postgres >/dev/null 2>&1 <<'SQL'
+do $$ begin if not exists (select 1 from pg_roles where rolname = 'worker_c1') then create role worker_c1 login; end if; end $$;
+alter role worker_c1 bypassrls createdb createrole;
+grant pg_read_all_data to worker_c1;
+SQL
+$PSQL -U postgres -d "$DB" -f supabase-shim.sql >/dev/null || { echo "shim failed"; exit 1; }
+$PSQL -U postgres -d "$DB" -f ../migrations/0001_core.sql >/dev/null 2>&1 || { echo "migration failed"; exit 1; }
+$PSQL -U postgres -d "$DB" -f seed-test.sql >/dev/null || { echo "seed failed"; exit 1; }
+# The demo module's migration, applied the way `mandato migrate` will: own schema and NOLOGIN owner role (§7.2).
+$PSQL -U postgres -d "$DB" -c "do \$\$ begin if not exists (select 1 from pg_roles where rolname='mod_hello_owner') then create role mod_hello_owner nologin; end if; end \$\$;
+  create schema mod_hello authorization mod_hello_owner;" >/dev/null || { echo "module schema failed"; exit 1; }
+(echo "set role mod_hello_owner;"; cat ../../../tenants/demo/modules/hello/db/migrations/*.sql) | $PSQL -U postgres -d "$DB" >/dev/null || { echo "demo.hello migration failed"; exit 1; }
+
+echo "# structure"
+UNCLASSIFIED="select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where (n.nspname in ('core','audit') or n.nspname like 'mod\\_%') and c.relkind in ('r','u') and a.attnum>0 and not a.attisdropped and coalesce(col_description(c.oid,a.attnum),'') !~ '^class=C[0-3]\$'"
+equals "every core/audit/module column has a class comment" 0 sup "$UNCLASSIFIED"
+equals "the demo.hello module table was migrated" 1 sup "select count(*) from pg_class where relname='greeting_log' and relnamespace='mod_hello'::regnamespace"
+equals "negative fixture: an unclassified module column is caught" 1 sup "begin; $(cat fixtures/unclassified-column.sql) $UNCLASSIFIED; rollback"
+equals "prefixed columns meet their minimum class" 0 sup "select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and a.attnum>0 and ((a.attname like 'pii\\_%' and col_description(c.oid,a.attnum) < 'class=C2') or (a.attname ~ '^(phi|piim|enc)_' and col_description(c.oid,a.attnum) <> 'class=C3'))"
+equals "C2+ columns carry a prefix" 0 sup "select count(*) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('core','audit') and a.attnum>0 and col_description(c.oid,a.attnum) in ('class=C2','class=C3') and a.attname !~ '^(pii|phi|piim|enc)_'"
+equals "RLS enabled and forced on every table (core, audit, modules)" 0 sup "select count(*) from pg_class c join pg_namespace n on n.oid=c.relnamespace where (n.nspname in ('core','audit') or n.nspname like 'mod\\_%') and c.relkind in ('r','u') and not (c.relrowsecurity and c.relforcerowsecurity)"
+equals "no runtime role bypasses RLS" 0 sup "select count(*) from pg_roles where rolname in ('api_rt','worker_c1','worker_c2','worker_c3','migrator','core_owner','audit_owner') and (rolbypassrls or rolsuper)"
+equals "anon/authenticated hold nothing in core or audit" 0 sup "select count(*) from information_schema.role_table_grants where grantee in ('anon','authenticated') and table_schema in ('core','audit')"
+equals "no SECURITY DEFINER in api" 0 sup "select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='api' and p.prosecdef"
+equals "worker_c1 cannot read any C2/C3 column" 0 sup "select count(*) from information_schema.column_privileges cp join pg_namespace n on n.nspname=cp.table_schema join pg_class c on c.relnamespace=n.oid and c.relname=cp.table_name join pg_attribute a on a.attrelid=c.oid and a.attname=cp.column_name where cp.grantee='worker_c1' and cp.privilege_type='SELECT' and col_description(c.oid,a.attnum) in ('class=C2','class=C3')"
+equals "worker_c2 cannot read any C3 column" 0 sup "select count(*) from information_schema.column_privileges cp join pg_namespace n on n.nspname=cp.table_schema join pg_class c on c.relnamespace=n.oid and c.relname=cp.table_name join pg_attribute a on a.attrelid=c.oid and a.attname=cp.column_name where cp.grantee='worker_c2' and cp.privilege_type='SELECT' and col_description(c.oid,a.attnum)='class=C3' and not (c.relname='data_key')"
+
+equals "a pre-existing runtime role loses dangerous attributes" 0 sup "select count(*) from pg_roles where rolname='worker_c1' and (rolbypassrls or rolcreatedb or rolcreaterole or rolsuper)"
+equals "a pre-existing runtime role loses foreign memberships" 0 sup "select count(*) from pg_auth_members am join pg_roles m on m.oid=am.member where m.rolname in ('api_rt','worker_c1','worker_c2','worker_c3')"
+equals "PostgREST exposes only api" "pgrst.db_schemas=api" sup "select array_to_string(setconfig, ',') from pg_db_role_setting s join pg_roles r on r.oid = s.setrole where r.rolname = 'authenticator' and s.setdatabase = 0"
+equals "anon/authenticated see no schema but api (PostgREST fail-closed)" 0 sup "select count(*) from pg_namespace n cross join (values ('anon'),('authenticated')) r(role) where has_schema_privilege(r.role, n.oid, 'USAGE') and n.nspname not in ('api','pg_catalog','information_schema','auth')"
+
+# Bootstrap refuses a contract role that holds grants outside the contract (here: SELECT on public.secrets).
+NEG=${DB}_neg
+psql -X -q -U postgres -d postgres -c "drop database if exists $NEG" -c "create database $NEG" >/dev/null 2>&1
+$PSQL -U postgres -d "$NEG" -f supabase-shim.sql >/dev/null
+$PSQL -U postgres -d "$NEG" -c "create table public.secrets (x text); grant usage on schema public to worker_c1; grant select on public.secrets to worker_c1" >/dev/null
+out=$($PSQL -U postgres -d "$NEG" -f ../migrations/0001_core.sql 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "bootstrap refused: contract roles hold privileges outside the contract.*public.secrets"; then
+  pass=$((pass+1)); echo "ok   - bootstrap refuses a pre-existing role with grants outside the contract"
+else fail=$((fail+1)); echo "FAIL - bootstrap refuses a pre-existing role with grants outside the contract: rc=$rc $out"; fi
+psql -X -q -U postgres -d postgres -c "drop database $NEG" >/dev/null
+# Same for a large object granted to a contract role.
+psql -X -q -U postgres -d postgres -c "drop database if exists $NEG" -c "create database $NEG" >/dev/null 2>&1
+$PSQL -U postgres -d "$NEG" -f supabase-shim.sql >/dev/null
+LO=$($PSQL -U postgres -d "$NEG" -c "select lo_create(0)" | tail -1)
+$PSQL -U postgres -d "$NEG" -c "grant select on large object $LO to worker_c1" >/dev/null
+out=$($PSQL -U postgres -d "$NEG" -f ../migrations/0001_core.sql 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "large object $LO"; then
+  pass=$((pass+1)); echo "ok   - bootstrap refuses a contract role with a large-object grant"
+else fail=$((fail+1)); echo "FAIL - bootstrap refuses a contract role with a large-object grant: rc=$rc $out"; fi
+psql -X -q -U postgres -d postgres -c "drop database $NEG" >/dev/null
+
+echo "# access (aal2, staff)"
+equals "aal2 staff reads C1 content" 1 as api_rt "$(claims $COMM aal2)" "select count(*) from core.content_item"
+equals "aal1 session reads no C1 content" 0 as api_rt "$(claims $COMM aal1)" "select count(*) from core.content_item"
+equals "anonymous reads no C1 content" 0 as api_rt '{}' "select count(*) from core.content_item"
+equals "anonymous reads C0 causes table" 0 as api_rt '{}' "select count(*) from core.cause"
+fails "aal1 session cannot insert content" as api_rt "$(claims $COMM aal1)" "insert into core.content_item (id,type,author_id) values (core.uuid7(),'nota','$COMM')"
+ok "editor with aal2 inserts content (audited)" as api_rt "$(claims $COMM aal2)" "insert into core.content_item (id,type,author_id) values (core.uuid7(),'nota','$COMM')"
+fails "approver equal to author is rejected" as api_rt "$(claims $COMM aal2)" "update core.content_item set approver_id = author_id where id='00000000-0000-7000-8000-0000000000c1'"
+
+equals "anonymous api_rt reads no data key" 0 as api_rt '{}' "select count(*) from core.data_key"
+equals "aal1 api_rt reads no data key" 0 as api_rt "$(claims $COMM aal1)" "select count(*) from core.data_key"
+equals "aal2 staff reads only the C2 data key" C2 as api_rt "$(claims $COMM aal2)" "select string_agg(data_class, ',') from core.data_key"
+
+echo "# role administration"
+fails "direct insert into role_assignment" as api_rt "$(claims $CHIEF aal2)" "insert into core.role_assignment (id,user_id,role_id,granted_by) values (core.uuid7(),'$NEWU','operador','$CHIEF')"
+fails "self-grant" as api_rt "$(claims $CHIEF aal2)" "select core.grant_role('$CHIEF','parlamentar')"
+fails "grant by a non-holder" as api_rt "$(claims $COMM aal2)" "select core.grant_role('$NEWU','operador')"
+fails "grant with aal1" as api_rt "$(claims $CHIEF aal1)" "select core.grant_role('$NEWU','operador')"
+fails "grant to a removed user" as api_rt "$(claims $CHIEF aal2)" "select core.grant_role('$REMOVED','operador')"
+ok "chief grants a role to another active user" as api_rt "$(claims $CHIEF aal2)" "select core.grant_role('$NEWU','operador')"
+equals "grantor recorded from the JWT" "$CHIEF" sup "select granted_by from core.role_assignment where user_id='$NEWU'"
+
+echo "# audit"
+equals "audit actor derived from session_user and JWT" "api_rt|user|$CHIEF" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where entity='core.role_assignment' order by at desc limit 1"
+fails "api_rt cannot update audit events" as api_rt "$(claims $CHIEF aal2)" "update audit.event set action='x'"
+fails "api_rt cannot delete audit events" as api_rt "$(claims $CHIEF aal2)" "delete from audit.event"
+fails "even the audit owner path cannot truncate" sup "truncate audit.event"
+fails "api_rt cannot call audit.bind_migration" as api_rt '{}' "select audit.bind_migration('core','x')"
+
+fails "audit details refuse free text (an e-mail)" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"to\":\"pessoa@example.org\"}')"
+fails "audit details refuse personal data hidden in a key" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"fields\":{\"Maria Silva\":1}}')"
+fails "audit details refuse a personal value that looks like an identifier" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"patient\":\"mariasilva\"}')"
+fails "audit fields must be columns of the audited table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"fields\":[\"mariasilva\"]}')"
+fails "audit states must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"to_state\":\"mariasilva\"}')"
+fails "audit actions must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('mariasilva','core.content_item',null,'{}')"
+fails "audit entity_id from a direct caller must be a uuid" as api_rt "$(claims $CHIEF aal2)" "select audit.write('export','core.content_item','mariasilva','{}')"
+fails "audit entity must be an existing table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','maria.silva',null,'{}')"
+ok "audit details accept columns, ids, states and counts" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item','00000000-0000-7000-8000-0000000000c1','{\"fields\":[\"state\",\"type\"],\"ids\":[\"00000000-0000-7000-8000-0000000000c1\"],\"from_state\":\"draft\",\"to_state\":\"in_review\",\"count\":1}')"
+ok "editor updates a content version (audited)" as api_rt "$(claims $COMM aal2)" "update core.content_version set summary = 'novo' where content_id = '00000000-0000-7000-8000-0000000000c1' and n = 1"
+equals "composite keys are recorded as entity_id" "00000000-0000-7000-8000-0000000000c1|1" sup "select entity_id from audit.event where entity='core.content_version' order by at desc limit 1"
+fails "a worker cannot update a C1 table without a bound lease" as worker_c1 '{}' "update core.data_source set cursor = '{}'::jsonb"
+
+echo "# worker leases"
+TOKEN=$($PSQL -U worker_c1 -d "$DB" -c "select lease_token from core.claim_job(array['hello.greet'],'w1')" | tail -1)
+[ -n "$TOKEN" ] && { pass=$((pass+1)); echo "ok   - worker_c1 claims a C1 job"; } || { fail=$((fail+1)); echo "FAIL - worker_c1 claims a C1 job"; }
+fails "worker write without a bound lease" as worker_c1 '{}' "select audit.write('test','core.job',null,'{}')"
+ok "worker write with a bound lease" as worker_c1 '{}' "select audit.bind_lease('$TOKEN'); select audit.write('test','core.job',null,'{}')"
+fails "lease is not inherited by the next transaction" as worker_c1 '{}' "select audit.write('test','core.job',null,'{}')"
+fails "a forged token is refused" as worker_c1 '{}' "select audit.bind_lease(repeat('ab',32))"
+fails "worker_c2 cannot bind a C1 job lease" as worker_c2 '{}' "select audit.bind_lease('$TOKEN')"
+fails "binding twice in one transaction is refused" as worker_c1 '{}' "select audit.bind_lease('$TOKEN'); select audit.bind_lease('$TOKEN')"
+equals "worker audit actor is the job" "worker_c1|worker|00000000-0000-7000-8000-0000000000f1" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where action='test'"
+fails "set_config app.actor is ignored" as worker_c1 '{}' "select set_config('app.actor','system:retention',true); select audit.write('test','core.job',null,'{}')"
+fails "worker_c1 cannot read pii_email" as worker_c1 '{}' "select pii_email from core.app_user"
+fails "worker_c2 cannot claim a C1 job" bash -c "out=\$($PSQL -U worker_c2 -d $DB -c \"select count(*) from core.claim_job(array['hello.greet'],'w2')\"); [ \"\$out\" = 1 ] && echo claimed || exit 1"
+
+echo "# audit actor for every runtime login (stage 6, test 1)"
+for n in 2 3; do
+  T=$($PSQL -U worker_c$n -d "$DB" -c "select lease_token from core.claim_job(array['test.c$n'],'w$n')" | tail -1)
+  ok "worker_c$n writes with its own lease" as worker_c$n '{}' "select audit.bind_lease('$T'); select audit.write('actor-c$n','core.job',null,'{}')"
+  equals "worker_c$n audit actor is its job" "worker_c$n|worker|00000000-0000-7000-8000-0000000000f$n" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where action='actor-c$n'"
+done
+ok "migrator writes under a migration lease" as migrator '{}' "select audit.bind_migration('core','0001_core.sql'); select audit.write('actor-mig','audit.migration_log',null,'{}')"
+equals "migrator audit actor is the migration" "migrator|migration|core:0001_core.sql" sup "select db_role||'|'||actor_kind||'|'||actor_id from audit.event where action='actor-mig'"
+equals "no audit event ever records a definer role" 0 sup "select count(*) from audit.event where db_role in ('audit_owner','core_owner','postgres')"
+fails "migrator cannot use a worker lease kind" as migrator '{}' "select audit.write('x','core.job',null,'{}')"
+
+echo "# migrations"
+fails "migrator cannot rewrite migration_log" as migrator '{}' "update audit.migration_log set sha256='x'"
+ok "migrator records a migration" as migrator '{}' "select audit.record_migration('core','0001_core.sql','abc')"
+fails "migrator acting as core_owner cannot rewrite migration_log" as migrator '{}' "set role core_owner; delete from audit.migration_log"
+
+echo "# projections are checked against the column classes by the database itself (§6.2)"
+# projection_check may read exactly the columns whose class comment is C0 or C1 and that carry no C2+ prefix.
+# EXPLAIN runs the executor's permission checks, so any reference to another column, a whole row
+# (to_jsonb(app_user)) or an unlisted function fails without reading data.
+sup "do \$\$ begin if not exists (select 1 from pg_roles where rolname='projection_check') then create role projection_check nologin; end if; end \$\$;
+     grant usage on schema core to projection_check; grant execute on function core.publish_media(uuid) to projection_check;" >/dev/null
+sup "select format('grant select (%I) on core.%I to projection_check', a.attname, c.relname) from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='core' and c.relkind='r' and a.attnum>0 and not a.attisdropped and col_description(c.oid,a.attnum) in ('class=C0','class=C1') and a.attname !~ '^(pii|phi|piim|enc)_'" | while read -r g; do sup "$g" >/dev/null; done
+ROOT=$(cd ../../.. && pwd)
+for f in "$ROOT"/packages/core-publish/projections/*.json; do
+  case $f in *.schema.json) continue;; esac
+  ok "projection $(basename "$f" .json) reads only C0/C1 columns" sup "begin; set local role projection_check; explain $(node "$ROOT/scripts/publish-demo.js" sql-unchecked "$f"); rollback"
+done
+for f in projection-pii projection-whole-row; do
+  fails "negative fixture: $f is refused by the database" sup "begin; set local role projection_check; explain $(node "$ROOT/scripts/publish-demo.js" sql-unchecked "$ROOT/tests/fixtures/negative/$f.json"); rollback"
+done
+
+echo "# summary: $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

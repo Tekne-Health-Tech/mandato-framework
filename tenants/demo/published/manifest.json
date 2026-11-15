@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "instance": "demo",
+  "generation": 1,
+  "min_generation": 0,
+  "min_app_version": "1.0.0",
+  "generated_at": "2026-11-15T12:00:00Z",
+  "expires_at": "2026-11-22T12:00:00Z",
+  "bundles": [
+    {
+      "name": "agenda-2026-11",
+      "url": "b/cf08a89fc4e130f59a13322db5ff7bf97e71d4c50dd6bb936c9397a64c68eeb6.json",
+      "sha256": "cf08a89fc4e130f59a13322db5ff7bf97e71d4c50dd6bb936c9397a64c68eeb6",
+      "bytes": 638,
+      "count": 2
+    },
+    {
+      "name": "causes",
+      "url": "b/f04f31c5a76f5b768f61c80c1d4b3ea1c29955f5e4a5b1887179674ba821087c.json",
+      "sha256": "f04f31c5a76f5b768f61c80c1d4b3ea1c29955f5e4a5b1887179674ba821087c",
+      "bytes": 396,
+      "count": 3
+    },
+    {
+      "name": "content-2026-11",
+      "url": "b/ba6f8e33cf59827fe7dab7c6c3fe5979c5b8cd25d8770356b6137dbce90aa6ff.json",
+      "sha256": "ba6f8e33cf59827fe7dab7c6c3fe5979c5b8cd25d8770356b6137dbce90aa6ff",
+      "bytes": 681,
+      "count": 1
+    },
+    {
+      "name": "municipalities",
+      "url": "b/4b2ae5e8e1ad62b00e8b8e96f599d073b9a950d003afe1d1b77432f0300fa0ff.json",
+      "sha256": "4b2ae5e8e1ad62b00e8b8e96f599d073b9a950d003afe1d1b77432f0300fa0ff",
+      "bytes": 630,
+      "count": 3
+    }
+  ],
+  "takedowns": [
+    {
+      "kind": "content",
+      "id": "00000000-0000-7000-8000-00000000c005",
+      "at": "2026-11-10T12:00:00+00:00"
+    }
+  ],
+  "sig": {
+    "key_id": "demo-test",
+    "alg": "Ed25519",
+    "value": "m9zllhR-WsPFl6pkvYgupCF50dchVvGfhQ2oDWDXiEfH6mxlWd948ACfBEMi1dR2lZOelvDcui3c2kO_g6FUDw"
+  }
+}

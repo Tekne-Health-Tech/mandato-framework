@@ -1,0 +1,87 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  boundaries:
+    name: Dependency direction
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-boundaries.sh
+
+  contracts:
+    name: Contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - name: TypeScript contracts compile
+        run: npx tsc -p .
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Python worker contracts
+        run: python -m unittest discover -s workers -t . -v
+      - name: AI boundary (static, §7.5)
+        run: python scripts/check_ai_boundary.py && ! python scripts/check_ai_boundary.py tests/fixtures/negative/ai-boundary
+
+  database:
+    name: Database contract (0001)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Adversarial tests
+        run: packages/db/test/run.sh
+      - name: Grant matrix is up to date
+        run: packages/db/test/grants.sh > /tmp/grants.md && diff -u packages/db/grants.md /tmp/grants.md
+      - name: Demo publication is reproducible from the seed
+        run: scripts/publish-demo.sh /tmp/published && diff -r tenants/demo/published /tmp/published
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.0 git /repo --redact --verbose
+
+  licenses:
+    name: Dependency licenses
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          allow-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, MPL-2.0, CC0-1.0, Unlicense, BlueOak-1.0.0, Python-2.0

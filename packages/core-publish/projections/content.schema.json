@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mandato:schema:projection:content:1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "updated_at",
+    "type",
+    "published_at",
+    "title",
+    "summary",
+    "body_md",
+    "figures",
+    "causes",
+    "media",
+    "ai_label"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "type": {
+      "type": "string"
+    },
+    "published_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "title": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "body_md": {
+      "type": "string"
+    },
+    "figures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "unit",
+          "source_id",
+          "source_url",
+          "reference_date"
+        ],
+        "properties": {
+          "value": {
+            "type": "number"
+          },
+          "unit": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string",
+            "pattern": "^https://"
+          },
+          "reference_date": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      }
+    },
+    "causes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "media": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "url",
+          "width",
+          "height",
+          "sha256",
+          "bytes"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "maximum": 307200
+          }
+        }
+      }
+    },
+    "ai_label": {
+      "type": "boolean"
+    }
+  }
+}

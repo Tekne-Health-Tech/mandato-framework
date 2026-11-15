@@ -1,0 +1,17 @@
+{
+  "id": "demo.hello",
+  "short": "hello",
+  "version": "0.1.0",
+  "requires_framework": "^0.1.0",
+  "requires_modules": [],
+  "data_classes": ["C0", "C1"],
+  "roles": [{ "id": "demo.hello.viewer", "label": "Visualizador" }],
+  "permissions": [{ "id": "demo.hello.read", "roles": ["demo.hello.viewer", "chefe_gabinete"] }],
+  "migrations": "db/migrations",
+  "web": "web/index.ts",
+  "mobile": "mobile/index.ts",
+  "worker": "worker/hello",
+  "settings_schema": "settings.schema.json",
+  "retention": [{ "table": "greeting_log", "days": 365 }],
+  "data_subject": null
+}

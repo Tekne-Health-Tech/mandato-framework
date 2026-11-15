@@ -1,0 +1,40 @@
+{
+  "projection": "agenda",
+  "version": 1,
+  "source": "core.agenda_event",
+  "where": "agenda_event.visibility = 'public' and agenda_event.status <> 'cancelled' and agenda_event.deleted_at is null",
+  "fields": {
+    "id": {
+      "expr": "agenda_event.id",
+      "class": "C0"
+    },
+    "updated_at": {
+      "expr": "agenda_event.updated_at",
+      "class": "C0"
+    },
+    "starts_at": {
+      "expr": "agenda_event.starts_at",
+      "class": "C0"
+    },
+    "ends_at": {
+      "expr": "agenda_event.ends_at",
+      "class": "C0"
+    },
+    "title": {
+      "expr": "agenda_event.title",
+      "class": "C0"
+    },
+    "kind": {
+      "expr": "agenda_event.kind",
+      "class": "C0"
+    },
+    "municipality_ibge": {
+      "expr": "agenda_event.municipality_ibge",
+      "class": "C0"
+    },
+    "place": {
+      "expr": "agenda_event.place",
+      "class": "C0"
+    }
+  }
+}

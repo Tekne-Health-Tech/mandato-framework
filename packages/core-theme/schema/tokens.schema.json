@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mandato:schema:tokens:1",
+  "title": "Design tokens",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "color", "typography", "radius", "spacing"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "color": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["light", "dark"],
+      "properties": { "light": { "$ref": "#/$defs/palette" }, "dark": { "$ref": "#/$defs/palette" } }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display", "body", "scale"],
+      "properties": {
+        "display": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "type": "string" }, "file": { "type": "string" } } },
+        "body": { "type": "object", "additionalProperties": false, "required": ["family"], "properties": { "family": { "type": "string" } } },
+        "scale": { "type": "array", "minItems": 4, "items": { "type": "number", "minimum": 10, "maximum": 64 } }
+      }
+    },
+    "radius": { "type": "array", "items": { "type": "number", "minimum": 0 } },
+    "spacing": { "type": "array", "items": { "type": "number", "minimum": 0 } }
+  },
+  "$defs": {
+    "hex": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+    "palette": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["brand", "brand-on", "accent", "link", "cta", "cta-on", "bg", "surface", "fg", "muted", "line", "success", "warning", "error", "info"],
+      "properties": {
+        "brand": { "$ref": "#/$defs/hex" }, "brand-on": { "$ref": "#/$defs/hex" }, "accent": { "$ref": "#/$defs/hex" },
+        "link": { "$ref": "#/$defs/hex" }, "cta": { "$ref": "#/$defs/hex" }, "cta-on": { "$ref": "#/$defs/hex" },
+        "bg": { "$ref": "#/$defs/hex" }, "surface": { "$ref": "#/$defs/hex" }, "fg": { "$ref": "#/$defs/hex" },
+        "muted": { "$ref": "#/$defs/hex" }, "line": { "$ref": "#/$defs/hex" }, "success": { "$ref": "#/$defs/hex" },
+        "warning": { "$ref": "#/$defs/hex" }, "error": { "$ref": "#/$defs/hex" }, "info": { "$ref": "#/$defs/hex" }
+      }
+    }
+  }
+}

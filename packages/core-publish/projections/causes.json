@@ -1,0 +1,28 @@
+{
+  "projection": "causes",
+  "version": 1,
+  "source": "core.cause",
+  "where": "true",
+  "fields": {
+    "id": {
+      "expr": "cause.slug",
+      "class": "C0"
+    },
+    "updated_at": {
+      "expr": "cause.updated_at",
+      "class": "C0"
+    },
+    "name": {
+      "expr": "cause.name",
+      "class": "C0"
+    },
+    "icon": {
+      "expr": "cause.icon",
+      "class": "C0"
+    },
+    "sort": {
+      "expr": "cause.sort",
+      "class": "C0"
+    }
+  }
+}

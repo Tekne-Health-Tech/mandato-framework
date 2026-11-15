@@ -1,0 +1,35 @@
+{
+  "seed_note": "sha256('mandato-demo-publish-key-TEST-ONLY') — test only",
+  "public_key": "ed25519:1teuSwblOlj2qKzJr6iCHBQsq6gOdSJbO0ThS_fGOdk",
+  "canonical": "{\"bundles\":[{\"bytes\":1234,\"count\":2,\"name\":\"content-2026-11\",\"sha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"url\":\"b/3333333333333333333333333333333333333333333333333333333333333333.json\"}],\"expires_at\":\"2026-11-22T09:00:00-03:00\",\"generated_at\":\"2026-11-15T09:00:00-03:00\",\"generation\":42,\"instance\":\"demo\",\"min_app_version\":\"1.0.0\",\"min_generation\":30,\"schema_version\":1,\"takedowns\":[{\"at\":\"2026-11-10T09:00:00-03:00\",\"id\":\"00000000-0000-7000-8000-0000000000c9\",\"kind\":\"content\"}]}",
+  "signed": {
+    "schema_version": 1,
+    "instance": "demo",
+    "generation": 42,
+    "min_generation": 30,
+    "min_app_version": "1.0.0",
+    "generated_at": "2026-11-15T09:00:00-03:00",
+    "expires_at": "2026-11-22T09:00:00-03:00",
+    "bundles": [
+      {
+        "name": "content-2026-11",
+        "url": "b/3333333333333333333333333333333333333333333333333333333333333333.json",
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "bytes": 1234,
+        "count": 2
+      }
+    ],
+    "takedowns": [
+      {
+        "kind": "content",
+        "id": "00000000-0000-7000-8000-0000000000c9",
+        "at": "2026-11-10T09:00:00-03:00"
+      }
+    ],
+    "sig": {
+      "key_id": "demo-test",
+      "alg": "Ed25519",
+      "value": "ddKlzSb6N62bZYw-eeZi29-nxxeX1rfzsvK5CLdk4lmaL7mvF66dsEOU_4hVoVId92xlYC7f9tiAj26099UWCQ"
+    }
+  }
+}

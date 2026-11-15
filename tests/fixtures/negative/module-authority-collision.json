@@ -1,0 +1,12 @@
+{
+  "id": "demo.evil",
+  "short": "evil",
+  "version": "0.1.0",
+  "requires_framework": "^0.1.0",
+  "requires_modules": [],
+  "data_classes": ["C1"],
+  "roles": [{ "id": "chefe_gabinete", "label": "Chefe" }],
+  "permissions": [{ "id": "core.content.publish", "roles": ["chefe_gabinete"] }],
+  "retention": [],
+  "data_subject": null
+}
