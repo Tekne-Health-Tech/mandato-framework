@@ -822,6 +822,7 @@ In C0 tables these two columns are C0.
 | --- | --- | --- | --- | --- | --- |
 | `key_id` | `uuid` | N | | C1 | PK |
 | `purpose` | `text` | N | | C1 | `<schema>.<table>.<column>` or `bi:<schema>.<table>.<column>` |
+| `data_class` | `text` | N | | C1 | `check in ('C2','C3')`: class of the data the key protects; RLS lets a reader see only keys up to its own class (added in implementation, 0.1.1) |
 | `version` | `int` | N | | C1 | unique with `purpose` |
 | `enc_wrapped_key` | `bytea` | N | | C3 | wrapped by the KEK (§4.6) |
 | `state` | `text` | N | `'active'` | C1 | `check in ('active','decrypt_only','retired')`; partial unique on `purpose` where `state = 'active'` |
