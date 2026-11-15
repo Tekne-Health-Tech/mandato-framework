@@ -764,6 +764,10 @@ grant select, insert, update, delete on core.idempotency, core.rate_counter to a
 create policy chief_read on audit.event for select to api_rt using (core.has_role('chefe_gabinete'));
 grant select on audit.event to api_rt;
 
+-- migration history: migrator reads it to refuse changed files at boot (§7.2); it can never write it directly
+create policy migrator_read on audit.migration_log for select to migrator using (true);
+grant select on audit.migration_log to migrator;
+
 -- nothing outside `api` for Supabase client roles
 revoke all on all tables in schema core, audit from anon, authenticated;
 revoke all on all functions in schema core, audit from anon, authenticated;
