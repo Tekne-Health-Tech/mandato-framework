@@ -482,6 +482,8 @@ Artifacts, all in this repository:
 - `packages/db/migrations/0001_core.sql` with RLS policies, comments and the CI checks in §3, §4.4.
 - `packages/core-contracts/src/*.ts` and `workers/core/contracts/*.py` as in §7, compiling, with no implementation beyond `NoneRouter`, `NoneProvider` and `EchoProvider`.
 - `docs/api-conventions.md` (§9).
+- `packages/db/grants.md` (generated grant matrix), `packages/core-publish/projections/*.json` with their schemas, and the shared test vectors in `packages/crypto/vectors/` and `packages/core-publish/vectors/`.
+- Adversarial SQL tests: self-grant, `aal1` reads, cross-pool column reads, audit writes without a lease, reuse of a lease after commit, and rewriting `audit.migration_log`.
 - Fixtures in `tenants/demo/`: valid `tenant.yaml`, neutral `theme/tokens.json`, seed with 4 staff users (one per framework role), 6 content items covering every state, 4 agenda events, 3 municipalities; a published `manifest.json` with two partitions, one takedown and one tombstoned record; `demo.hello` module with a route, a screen and a job. Synthetic data only.
 - Negative fixtures that CI must reject: a `tenant.yaml` with an unknown key, a token set failing contrast, a migration with an unclassified column, a publish attempt including a `pii_` column.
 
