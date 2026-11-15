@@ -48,3 +48,54 @@ test('mandato validate exits 0, 1 and 2', () => {
   assert.equal(cli('validate', copy((t) => { t.flags = {}; })).status, 1);
   assert.equal(cli('validate').status, 2);
 });
+
+// Wave 1 cross-provider review (docs/lanes/wave-1-review-codex.md): each case failed before the fix.
+const addModule = (dir, name, manifest) => {
+  cpSync(join(dir, 'modules/hello'), join(dir, 'modules', name), { recursive: true });
+  const base = parse(readFileSync(join(dir, 'modules/hello/mandato.module.json'), 'utf8'));
+  writeFileSync(join(dir, 'modules', name, 'mandato.module.json'), JSON.stringify({ ...base, ...manifest }));
+};
+const withHello = (patch) => copy((t, d) => {
+  const p = join(d, 'modules/hello/mandato.module.json');
+  writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), ...patch }));
+});
+test('review 3: two modules with the same short are an error', () => {
+  const dir = copy((t, d) => {
+    addModule(d, 'other', { id: 'demo.other', roles: [], permissions: [] });
+    t.modules.push({ id: 'demo.other', settings: { greeting: 'Oi' } });
+  });
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('short hello is already used')));
+});
+test('review 4: inline credentials are refused, *_secret_ref is accepted', () => {
+  const bad = [
+    (t) => { t.connectors[0].params.authorization = 'Bearer SYNTHETIC_NOT_A_SECRET'; },
+    (t) => { t.connectors[0].params.endpoint = 'Bearer SYNTHETIC_NOT_A_SECRET'; },
+    (t) => { t.connectors[0].params.client_secret_value = 'x'; },
+    (t) => { t.modules.find((m) => m.id === 'demo.hello').settings.private_key = 'x'; },
+  ];
+  for (const mutate of bad) assert.ok(loadTenant(copy(mutate)).errors.some((e) => e.includes('credential')), mutate.toString());
+  assert.ok(!loadTenant(copy((t) => { t.connectors[0].params.auth_secret_ref = 'vault:ibge'; })).errors.some((e) => e.includes('credential')));
+});
+test('review 5: framework range and enabled dependencies are checked', () => {
+  assert.ok(loadTenant(withHello({ requires_framework: '^99.0.0' })).errors.some((e) => e.includes('requires framework')));
+  assert.ok(loadTenant(withHello({ requires_framework: '*' })).errors.some((e) => e.includes('not a supported range')));
+  assert.ok(loadTenant(withHello({ requires_modules: ['core.missing'] })).errors.some((e) => e.includes('core.missing, which is not enabled')));
+  assert.deepEqual(loadTenant(withHello({ requires_modules: ['core.content'] })).errors, []);
+});
+test('review 6: paths may not leave the tenant or the module', () => {
+  assert.ok(loadTenant(copy((t) => { t.theme = '../outside/tokens.json'; })).errors.some((e) => e.includes('outside')));
+  assert.ok(loadTenant(withHello({ settings_schema: '../../outside.json' })).errors.some((e) => e.includes('outside')));
+  assert.ok(loadTenant(withHello({ migrations: '../../outside-migrations' })).errors.some((e) => e.includes('outside the module')));
+});
+test('review 7: an unknown validate flag is a usage error', () => assert.equal(cli('validate', demo, '--strcit').status, 2));
+test('review 8: duplicate cause slugs are an error', () => {
+  assert.ok(loadTenant(copy((t) => { t.causes.push({ ...t.causes[0], name: 'Outra' }); })).errors.some((e) => e.includes('duplicate cause slug')));
+});
+test('review 10: malformed referenced JSON is a validation error, not a crash', () => {
+  const theme = copy((t, d) => writeFileSync(join(d, 'theme/tokens.json'), '{'));
+  assert.ok(loadTenant(theme).errors.some((e) => e.includes('invalid JSON')));
+  const manifest = copy((t, d) => writeFileSync(join(d, 'modules/hello/mandato.module.json'), '{'));
+  assert.ok(loadTenant(manifest).errors.some((e) => e.includes('invalid JSON')));
+  const settings = copy((t, d) => writeFileSync(join(d, 'modules/hello/settings.schema.json'), '{"type": 5}'));
+  assert.ok(loadTenant(settings).errors.some((e) => e.includes('not a valid schema')));
+});

@@ -5,12 +5,12 @@
 //   migrate:   as `migrator`, forward-only: records 0001, then applies module migrations in order, each in one
 //              transaction under a migration lease and SET ROLE mod_<short>_owner. A recorded file whose hash
 //              changed aborts. Forbidden statements are rejected before anything runs.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadTenant } from '../../core-config/src/load.js';
+import { inside, loadTenant } from '../../core-config/src/load.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const CORE = join(root, 'packages/db/migrations/0001_core.sql');
@@ -26,11 +26,14 @@ function psql(db, user, sql, { file } = {}) {
 
 // §7.2: a module migration may not create SECURITY DEFINER functions, event triggers, extensions or roles, and may
 // not change roles, grants on other schemas or session authorization. Comments and string bodies are stripped first.
+// This screen is an early lint. The boundary is the database: migrator is a member of no core or audit owner role,
+// record_migration needs the transaction's own migration lease, and the file runs through EXECUTE, so psql never
+// interprets it (no backslash commands such as \i or \!).
 const FORBIDDEN = [
   [/\bsecurity\s+definer\b/i, 'SECURITY DEFINER'], [/\bevent\s+trigger\b/i, 'event trigger'],
   [/\bcreate\s+(or\s+replace\s+)?extension\b/i, 'CREATE EXTENSION'], [/\b(create|alter|drop)\s+(role|user|group)\b/i, 'role DDL'],
   [/\bset\s+(session\s+)?role\b/i, 'SET ROLE'], [/\bset\s+session\s+authorization\b/i, 'SET SESSION AUTHORIZATION'],
-  [/\bsearch_path\b/i, 'search_path change'], [/\b(core|audit|api|public|pg_catalog|auth)\s*\./i, 'object outside the module schema'],
+  [/\bsearch_path\b/i, 'search_path change'], [/\bset_config\b/i, 'set_config'], [/\b(core|audit|api|public|pg_catalog|auth)\s*\./i, 'object outside the module schema'],
   [/\bgrant\b[\s\S]*\bto\s+(public|anon|authenticated)\b/i, 'grant to client roles'], [/\bcopy\b[\s\S]*\b(program|from\s+'\/)/i, 'COPY from server'],
 ];
 export function forbiddenStatements(sql) {
@@ -45,7 +48,7 @@ function localModules(tenantDir) {
   return config.modules.filter((m) => !m.id.startsWith('core.')).map((m) => {
     const dir = join(tenantDir, 'modules', m.id.split('.')[1]);
     const manifest = JSON.parse(readFileSync(join(dir, 'mandato.module.json'), 'utf8'));
-    return { id: m.id, short: manifest.short, requires: manifest.requires_modules ?? [], migrations: manifest.migrations ? join(dir, manifest.migrations) : null };
+    return { id: m.id, short: manifest.short, requires: manifest.requires_modules ?? [], migrations: manifest.migrations ? inside(dir, manifest.migrations) : null };
   });
 }
 
@@ -86,6 +89,13 @@ export function migrate(db, tenantDir, migrator = 'migrator') {
     if (!m.migrations || !existsSync(m.migrations)) continue;
     for (const f of readdirSync(m.migrations).filter((x) => x.endsWith('.sql')).sort()) steps.push({ module: m.id, short: m.short, id: f, file: join(m.migrations, f) });
   }
+  // A recorded migration of core or of an enabled module whose file is gone also aborts: history is forward-only.
+  const present = new Set(steps.map((s) => `${s.module}:${s.id}`));
+  const enabled = new Set(['core', ...localModules(tenantDir).map((m) => m.id)]);
+  for (const key of applied.keys()) {
+    const module = key.slice(0, key.indexOf(':'));
+    if (enabled.has(module) && !present.has(key)) throw new Error(`migration ${key} was applied but its file is missing; migrations are forward-only`);
+  }
   const done = [];
   for (const s of steps) {
     const text = readFileSync(s.file, 'utf8'); const hash = sha(text); const key = `${s.module}:${s.id}`;
@@ -99,11 +109,13 @@ export function migrate(db, tenantDir, migrator = 'migrator') {
     }
     const bad = forbiddenStatements(text);
     if (bad.length) throw new Error(`migration ${key} rejected: ${bad.join(', ')}`);
+    const tag = `m${randomBytes(12).toString('hex')}`;   // random dollar-quote tag; the file cannot close it
+    if (text.includes(tag)) throw new Error(`migration ${key}: quoting tag collision, run again`);
     psql(db, migrator, `begin;
       select audit.bind_migration(${lit(s.module)}, ${lit(s.id)});
       set local role mod_${s.short}_owner;
       set local search_path = mod_${s.short}, pg_temp;
-      ${text}
+      do $${tag}_do$ begin execute $${tag}$${text}$${tag}$; end $${tag}_do$;
       reset role;
       select audit.record_migration(${lit(s.module)}, ${lit(s.id)}, ${lit(hash)});
       commit;`);

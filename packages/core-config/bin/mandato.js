@@ -9,7 +9,7 @@ const [cmd, dir, ...rest] = process.argv.slice(2);
 const usage = () => { console.error('usage: mandato validate <tenantDir> [--strict] | bootstrap|migrate <tenantDir> <database>'); process.exit(2); };
 if (!dir) usage();
 if (cmd === 'bootstrap' || cmd === 'migrate') {
-  if (!rest[0]) usage();
+  if (rest.length !== 1) usage();
   try {
     if (cmd === 'bootstrap') { bootstrap(rest[0], dir); console.log('bootstrap: done'); }
     else { const applied = migrate(rest[0], dir); console.log(applied.length ? `migrate: applied ${applied.join(', ')}` : 'migrate: up to date'); }
@@ -17,6 +17,8 @@ if (cmd === 'bootstrap' || cmd === 'migrate') {
   } catch (e) { console.error(`${cmd}: ${e.message}`); process.exit(1); }
 }
 if (cmd !== 'validate') usage();
+// Any argument other than --strict is a usage error: a typo must not silently drop production validation.
+if (rest.some((a) => a !== '--strict')) usage();
 const { errors, pending } = loadTenant(dir, { strict: rest.includes('--strict') });
 for (const p of pending) console.log(`pending: ${p}`);
 for (const e of errors) console.error(`error: ${e}`);

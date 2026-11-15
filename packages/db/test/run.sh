@@ -141,8 +141,10 @@ fails "migrator cannot use a worker lease kind" as migrator '{}' "select audit.w
 
 echo "# migrations"
 fails "migrator cannot rewrite migration_log" as migrator '{}' "update audit.migration_log set sha256='x'"
-ok "migrator records a migration" as migrator '{}' "select audit.record_migration('core','test-record','abc')"
-fails "migrator acting as core_owner cannot rewrite migration_log" as migrator '{}' "set role core_owner; delete from audit.migration_log"
+ok "migrator records the migration bound to its transaction" as migrator '{}' "select audit.bind_migration('test.record','test-record'); select audit.record_migration('test.record','test-record','abc')"
+fails "migrator cannot record a migration without its lease" as migrator '{}' "select audit.record_migration('core','test-unbound','abc')"
+fails "migrator cannot record a migration other than the bound one" as migrator '{}' "select audit.bind_migration('core','test-a'); select audit.record_migration('demo.hello','0099_fake.sql','abc')"
+equals "migrator is a member of no core or audit owner role" 0 sup "select count(*) from pg_auth_members m where m.member='migrator'::regrole and m.roleid::regrole::text in ('core_owner','audit_owner','audit_archiver')"
 
 echo "# projections are checked against the column classes by the database itself (§6.2)"
 # projection_check may read exactly the columns whose class comment is C0 or C1 and that carry no C2+ prefix.
@@ -159,6 +161,14 @@ for f in projection-pii projection-whole-row; do
   fails "negative fixture: $f is refused by the database" sup "begin; set local role projection_check; explain $(node "$ROOT/scripts/publish-demo.js" sql-unchecked "$ROOT/tests/fixtures/negative/$f.json"); rollback"
 done
 
+echo "# a module migration that leaves its owner role reaches nothing in core or audit (§7.2, database-enforced)"
+# These run the runner's transaction by hand, so the static screen is not in the way: the database is the boundary.
+MIG="select audit.bind_migration('demo.hello','escape-test'); set local role mod_hello_owner; set local search_path = mod_hello, pg_temp"
+fails "set_config('role','core_owner') from a module migration" as migrator '{}' "$MIG; select set_config('role','core_owner',true)"
+fails "after RESET ROLE a module migration cannot create in core" as migrator '{}' "$MIG; reset role; create table core.escaped(id int)"
+fails "after RESET ROLE a module migration cannot record another migration" as migrator '{}' "$MIG; reset role; select audit.record_migration('demo.hello','0099_fake.sql','abc')"
+equals "nothing escaped into core" 0 sup "select count(*) from pg_class where relname = 'escaped'"
+
 echo "# migration runner (§7.2)"
 MANDATO="node $ROOT/packages/core-config/bin/mandato.js"
 equals "migrate is idempotent" "migrate: up to date" bash -c "$MANDATO migrate $ROOT/tenants/demo $DB"
@@ -171,6 +181,13 @@ cp "$ROOT/tenants/demo/modules/hello/db/migrations/0001_hello.sql" "$TMPT/module
 printf 'create function mod_hello.f() returns int language sql security definer as $f$ select 1 $f$;\n' > "$TMPT/modules/hello/db/migrations/0002_bad.sql"
 fails "a module migration with SECURITY DEFINER is rejected" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
 equals "the rejected migration left nothing behind" 0 sup "select count(*) from pg_proc where proname = 'f' and pronamespace = 'mod_hello'::regnamespace"
+MARK=$(mktemp -u); printf 'create table t_meta(id int);
+\\! touch %s
+' "$MARK" > "$TMPT/modules/hello/db/migrations/0002_bad.sql"
+fails "a psql backslash command in a migration is not executed" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
+equals "the backslash command did not run" no bash -c "[ -e $MARK ] && echo yes || echo no"
+rm -f "$TMPT/modules/hello/db/migrations/0002_bad.sql" "$TMPT/modules/hello/db/migrations/0001_hello.sql"
+fails "an applied migration whose file was deleted aborts" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
 rm -rf "$TMPT"
 
 echo "# summary: $pass passed, $fail failed"

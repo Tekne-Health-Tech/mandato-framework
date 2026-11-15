@@ -49,6 +49,8 @@ test('CLI refuses font values that could break out of CSS', () => {
   const out = mkdtempSync(join(tmpdir(), 'mandato-theme-inject-'));
   const cases = [
     ['body', { family: 'x; } body { display: none } :root {' }],
+    ['body', { family: '"' }],
+    ['body', { family: "foo'bar" }],
     ['display', { family: 'system-ui', file: '../../etc/passwd.woff2' }],
     ['display', { family: 'system-ui', file: '/abs/font.woff2' }],
   ];

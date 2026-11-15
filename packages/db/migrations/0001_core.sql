@@ -38,7 +38,8 @@ alter role api_rt    set idle_in_transaction_session_timeout = '5min';
 alter role worker_c1 set idle_in_transaction_session_timeout = '5min';
 alter role worker_c2 set idle_in_transaction_session_timeout = '5min';
 alter role worker_c3 set idle_in_transaction_session_timeout = '5min';
-grant core_owner to migrator;   -- migrator may SET ROLE core_owner; noinherit keeps rights off by default
+-- migrator is a member of no core or audit owner role: core migrations run at bootstrap as the superuser, and a
+-- module migration that leaves its owner role (set_config('role', ...), RESET ROLE) gains nothing in core or audit.
 
 -- ---------------------------------------------------------------- schemas
 create schema core  authorization core_owner;
@@ -572,6 +573,11 @@ create function audit.record_migration(p_module_id text, p_migration_id text, p_
   set search_path = pg_catalog, audit, pg_temp as $$
 begin
   if session_user <> 'migrator' then raise exception 'audit: only migrator records migrations'; end if;
+  -- only the migration bound to this transaction, so a migration cannot pre-record or fake another one
+  if not exists (select 1 from audit.tx_lease l where l.txid = pg_current_xact_id() and l.kind = 'migration'
+                 and l.ref = p_module_id || ':' || p_migration_id) then
+    raise exception 'audit: record_migration needs the migration lease of %:%', p_module_id, p_migration_id;
+  end if;
   insert into audit.migration_log (module_id, migration_id, sha256) values (p_module_id, p_migration_id, p_sha256);
 end $$;
 
