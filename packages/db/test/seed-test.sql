@@ -22,4 +22,9 @@ insert into core.job (id, queue, data_class, payload) values
   ('00000000-0000-7000-8000-0000000000f1', 'hello.greet', 'C1', '{}'),
   ('00000000-0000-7000-8000-0000000000f2', 'test.c2',     'C2', '{}'),
   ('00000000-0000-7000-8000-0000000000f3', 'test.c3',     'C3', '{}');
+insert into core.data_source (source_id, name, terms_url, cadence) values
+  ('ibge-municipios', 'IBGE municípios', 'https://example.org/termos', '0 6 1 * *');
+insert into core.data_key (key_id, purpose, data_class, version, enc_wrapped_key) values
+  ('00000000-0000-7000-8000-0000000000b2', 'pii', 'C2', 1, '\x00'),
+  ('00000000-0000-7000-8000-0000000000b3', 'phi', 'C3', 1, '\x00');
 set session_replication_role = origin;

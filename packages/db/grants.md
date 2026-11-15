@@ -3,7 +3,6 @@
 | Role | Object | Privileges |
 | --- | --- | --- |
 | api_rt | audit.event | SELECT |
-| api_rt | audit.row_trigger() | EXECUTE |
 | api_rt | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | api_rt | core.agenda_event | INSERT, SELECT, UPDATE |
 | api_rt | core.ai_provenance | SELECT |
@@ -38,17 +37,13 @@
 | api_rt | core.role | SELECT |
 | api_rt | core.role_assignment | SELECT |
 | api_rt | core.role_permission | SELECT |
-| api_rt | core.touch_updated_at() | EXECUTE |
 | api_rt | core.uuid7() | EXECUTE |
 | migrator | audit.bind_migration(p_module_id text, p_migration_id text) | EXECUTE |
 | migrator | audit.record_migration(p_module_id text, p_migration_id text, p_sha256 text) | EXECUTE |
-| migrator | audit.row_trigger() | EXECUTE |
 | migrator | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
-| migrator | core.touch_updated_at() | EXECUTE |
 | migrator | core.uuid7() | EXECUTE |
 | worker_c1 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c1 | audit.pool_classes(p_role name) | EXECUTE |
-| worker_c1 | audit.row_trigger() | EXECUTE |
 | worker_c1 | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | worker_c1 | core.agenda_event | SELECT |
 | worker_c1 | core.ai_provenance | INSERT |
@@ -83,11 +78,9 @@
 | worker_c1 | core.media_asset | SELECT |
 | worker_c1 | core.municipality | SELECT |
 | worker_c1 | core.publish_media(p_content uuid) | EXECUTE |
-| worker_c1 | core.touch_updated_at() | EXECUTE |
 | worker_c1 | core.uuid7() | EXECUTE |
 | worker_c2 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c2 | audit.pool_classes(p_role name) | EXECUTE |
-| worker_c2 | audit.row_trigger() | EXECUTE |
 | worker_c2 | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | worker_c2 | core.agenda_event | SELECT |
 | worker_c2 | core.ai_provenance | INSERT |
@@ -123,11 +116,9 @@
 | worker_c2 | core.job (state) | SELECT, UPDATE |
 | worker_c2 | core.media_asset | SELECT |
 | worker_c2 | core.municipality | SELECT |
-| worker_c2 | core.touch_updated_at() | EXECUTE |
 | worker_c2 | core.uuid7() | EXECUTE |
 | worker_c3 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c3 | audit.pool_classes(p_role name) | EXECUTE |
-| worker_c3 | audit.row_trigger() | EXECUTE |
 | worker_c3 | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | worker_c3 | core.agenda_event | SELECT |
 | worker_c3 | core.ai_provenance | INSERT |
@@ -163,5 +154,4 @@
 | worker_c3 | core.job (state) | SELECT, UPDATE |
 | worker_c3 | core.media_asset | SELECT |
 | worker_c3 | core.municipality | SELECT |
-| worker_c3 | core.touch_updated_at() | EXECUTE |
 | worker_c3 | core.uuid7() | EXECUTE |

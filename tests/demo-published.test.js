@@ -13,7 +13,7 @@ const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
 const json = (p) => JSON.parse(read(p));
 const ajv = addFormats(new Ajv2020({ allErrors: true, strict: false }));
 const manifest = json('tenants/demo/published/manifest.json');
-const keyring = parseYaml(read('tenants/demo/tenant.yaml')).publish_keys.map(({ key_id, public_key }) => ({ key_id, public_key }));
+const keyring = parseYaml(read('tenants/demo/tenant.yaml')).publish_keys.map(({ key_id, public_key, role }) => ({ key_id, public_key, role }));
 const now = new Date('2026-11-16T12:00:00Z');
 const bundle = (name) => JSON.parse(read(`tenants/demo/published/${manifest.bundles.find((b) => b.name === name).url}`));
 
@@ -51,10 +51,10 @@ test('two month partitions, one takedown, one tombstone, nothing internal', () =
   assert.ok(!agenda.includes('00000000-0000-7000-8000-00000000e004'), 'tombstoned event still published');
 });
 
-test('a projection with a non-C0 field cannot produce SQL', () => {
+test('lint (not the proof; run.sh asks the database): a non-C0 field cannot produce SQL', () => {
   assert.throws(() => projectionSql({ projection: 'x', source: 'core.app_user', where: 'true', fields: { id: { expr: 'pii_email', class: 'C2' } } }), /not C0/);
 });
 
-test('negative fixture: a projection that reads a pii_ column is refused even when labelled C0', () => {
+test('lint (not the proof; run.sh asks the database): a pii_ column is refused even when labelled C0', () => {
   assert.throws(() => projectionSql(json('tests/fixtures/negative/projection-pii.json')), /C2\+ column/);
 });

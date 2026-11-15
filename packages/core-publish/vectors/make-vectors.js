@@ -10,7 +10,6 @@ const unsigned = {
   generated_at: '2026-11-15T09:00:00-03:00', expires_at: '2026-11-22T09:00:00-03:00',
   bundles: [{ name: 'content-2026-11', url: `b/${'3'.repeat(64)}.json`, sha256: '3'.repeat(64), bytes: 1234, count: 2 }],
   takedowns: [{ kind: 'content', id: '00000000-0000-7000-8000-0000000000c9', at: '2026-11-10T09:00:00-03:00' }],
-  note_unicode: 'Ação €  😀',
 };
 const signed = signManifest(unsigned, 'demo-test', key);
 writeFileSync(new URL('./manifest-v1.json', import.meta.url), `${JSON.stringify({

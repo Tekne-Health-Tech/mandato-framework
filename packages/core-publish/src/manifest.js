@@ -28,8 +28,10 @@ export function signManifest(unsigned, keyId, privateKey) {
 }
 
 /**
- * Reference client algorithm, steps 2–5 of §6.3. Returns { accept, reason, takedowns, dropAll, stopAfterTakedowns }.
- * keyring: [{ key_id, public_key, revoked? }]; state: { generation, minGenerationAtBuild, appVersion }.
+ * Reference client algorithm, steps 2–5 of §6.3.
+ * keyring: [{ key_id, public_key, role: 'current' | 'next', revoked? }]; state: { generation, minGenerationAtBuild, appVersion }.
+ * Returns { accept, reason, takedowns, dropAll, stopAfterTakedowns, keyring }. `keyring` is the keyring the device must
+ * store from now on: a `keyring_update` signed by a current key revokes keys and adds a `next` key. Revocation is final.
  */
 export function evaluateManifest(manifest, keyring, state, now = new Date()) {
   const reject = (reason) => ({ accept: false, reason });
@@ -41,13 +43,27 @@ export function evaluateManifest(manifest, keyring, state, now = new Date()) {
   if (!okSig) return reject('bad-signature');
   if (new Date(manifest.expires_at) <= now) return reject('expired');
   if (manifest.generation < Math.max(state.generation ?? 0, state.minGenerationAtBuild ?? 0)) return reject('rollback');
+  let nextKeyring = keyring;
+  if (manifest.keyring_update) {
+    if (key.role !== 'current') return reject('keyring-update-not-signed-by-current');
+    nextKeyring = applyKeyringUpdate(keyring, manifest.keyring_update);
+  }
   const tooOld = compareVersions(manifest.min_app_version, state.appVersion) > 0;
   return {
     accept: true,
+    keyring: nextKeyring,
     takedowns: manifest.takedowns,                                   // always applied first
     stopAfterTakedowns: tooOld,                                      // unsupported app: purge, then stop
     dropAll: (state.generation ?? 0) < manifest.min_generation,
   };
+}
+
+export function applyKeyringUpdate(keyring, update) {
+  const revoke = new Set(update.revoke ?? []);
+  const out = keyring.map((k) => (revoke.has(k.key_id) ? { ...k, revoked: true } : k));
+  const add = update.add_next;
+  if (add && !out.some((k) => k.key_id === add.key_id)) out.push({ key_id: add.key_id, public_key: add.public_key, role: 'next' });
+  return out;
 }
 
 function compareVersions(a, b) {

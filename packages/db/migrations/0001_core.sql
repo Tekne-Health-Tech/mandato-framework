@@ -10,13 +10,23 @@ declare r text;
 begin
   foreach r in array array['core_owner','audit_owner','audit_archiver'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
-      execute format('create role %I nologin noinherit nobypassrls', r);
+      execute format('create role %I nologin', r);
     end if;
+    -- A role that already existed is reset too: attributes are enforced, never assumed (§4.1).
+    execute format('alter role %I nologin noinherit nosuperuser nobypassrls nocreaterole nocreatedb noreplication', r);
   end loop;
   foreach r in array array['api_rt','worker_c1','worker_c2','worker_c3','migrator'] loop
     if not exists (select 1 from pg_roles where rolname = r) then
-      execute format('create role %I login noinherit nobypassrls nocreaterole nocreatedb', r);
+      execute format('create role %I login', r);
     end if;
+    execute format('alter role %I login noinherit nosuperuser nobypassrls nocreaterole nocreatedb noreplication', r);
+  end loop;
+  -- Drop every membership these roles hold; the only one the contract grants is re-added below.
+  for r in select format('revoke %I from %I granted by %I', g.rolname, m.rolname, gr.rolname)
+             from pg_auth_members am join pg_roles g on g.oid = am.roleid join pg_roles m on m.oid = am.member
+             join pg_roles gr on gr.oid = am.grantor
+            where m.rolname in ('core_owner','audit_owner','audit_archiver','api_rt','worker_c1','worker_c2','worker_c3','migrator') loop
+    execute r;
   end loop;
 end $$;
 
@@ -36,6 +46,13 @@ create schema audit authorization audit_owner;
 create schema api   authorization core_owner;
 revoke all on schema core, audit, api from public;
 revoke create on schema public from public;
+revoke all on schema public from public, anon, authenticated;   -- PostgREST must see nothing outside `api` (§4.1)
+do $$ begin
+  -- Supabase's PostgREST reads its exposed schemas from this setting; pin it to `api` when the role exists.
+  if exists (select 1 from pg_roles where rolname = 'authenticator') then
+    execute 'alter role authenticator set pgrst.db_schemas = ''api''';
+  end if;
+end $$;
 grant usage on schema api to anon, authenticated, api_rt;
 grant usage on schema core to api_rt, worker_c1, worker_c2, worker_c3;
 grant usage on schema audit to api_rt, worker_c1, worker_c2, worker_c3, migrator;
@@ -383,7 +400,7 @@ begin
         when r.col like 'pii\_%' then 'C2'
         when r.col like 'phi\_%' or r.col like 'piim\_%' or r.col like 'enc\_%' then 'C3'
         when r.s = 'core' and r.t = any(c0_tables) then 'C0'
-        when r.s = 'core' and r.t = 'data_source' and r.col <> 'cursor' then 'C0'
+        when r.s = 'core' and r.t = 'data_source' and r.col in ('source_id','name','terms_url','cadence','last_success_at') then 'C0'
         else 'C1' end);
   end loop;
   for r in select n.nspname s, c.relname t from pg_class c join pg_namespace n on n.oid = c.relnamespace
@@ -444,6 +461,17 @@ create function core.is_staff() returns boolean language sql stable security def
 $$;
 
 -- ---------------------------------------------------------------- audit functions (§4.5)
+-- Appendix A: `details` holds ids and field names only. Every key and every string value must be an identifier
+-- or a uuid, so free text (names, e-mails, messages) cannot be written into the five-year trail.
+create function audit.details_ok(p jsonb) returns boolean language sql immutable
+  set search_path = pg_catalog, pg_temp as $$
+  select jsonb_typeof(p) = 'object'
+     and not exists (
+       select 1 from jsonb_path_query(p, 'strict $.**') v
+        where (jsonb_typeof(v) = 'string' and not (v #>> '{}') ~ '^([a-z][a-z0-9_.:-]{0,63}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
+           or (jsonb_typeof(v) = 'object' and exists (select 1 from jsonb_object_keys(v) k where k !~ '^[a-z][a-z0-9_]{0,63}$')))
+$$;
+
 create function audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb)
 returns void language plpgsql security definer set search_path = pg_catalog, audit, pg_temp as $$
 declare
@@ -464,6 +492,13 @@ begin
     v_id := v_lease.ref;
   else
     raise exception 'audit: role % may not write audit events', session_user;
+  end if;
+  if not audit.details_ok(coalesce(p_details, '{}')) then
+    raise exception 'audit: details may hold ids and field names only';
+  end if;
+  if p_action !~ '^[a-z][a-z0-9_.:-]{0,63}$' or p_entity !~ '^[a-z][a-z0-9_.]{0,63}$'
+     or (p_entity_id is not null and p_entity_id !~ '^[A-Za-z0-9_.:|-]{1,200}$') then
+    raise exception 'audit: action, entity and entity_id must be identifiers';
   end if;
   insert into audit.event (actor_kind, actor_id, action, entity, entity_id, details, db_role)
   values (v_kind, v_id, p_action, p_entity, p_entity_id, coalesce(p_details, '{}'), session_user);
@@ -506,7 +541,10 @@ declare v_row record;
 begin
   v_row := case when tg_op = 'DELETE' then old else new end;
   perform audit.write(lower(tg_op), tg_table_schema || '.' || tg_table_name,
-    case when to_jsonb(v_row) ? 'id' then to_jsonb(v_row) ->> 'id' else null end,
+    (select string_agg(to_jsonb(v_row) ->> a.attname, '|' order by k.n)
+       from pg_index i cross join lateral unnest(i.indkey) with ordinality k(attnum, n)
+       join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum
+      where i.indrelid = tg_relid and i.indisprimary),
     jsonb_build_object('fields', case when tg_op = 'UPDATE'
       then (select coalesce(jsonb_agg(k), '[]') from jsonb_object_keys(to_jsonb(new)) k
              where to_jsonb(new) -> k is distinct from to_jsonb(old) -> k and k <> 'updated_at')
@@ -518,7 +556,10 @@ do $$
 declare t text;
 begin
   foreach t in array array['app_user','role_assignment','role_permission','content_item','content_version','content_cause',
-                           'media_asset','content_media','agenda_event','data_key','module_registry','publish_generation'] loop
+                           'media_asset','content_media','agenda_event','data_key','module_registry','publish_generation',
+                           'role','permission','data_source','data_source_run','ai_provenance'] loop
+    -- not audited row by row: core.job (lease and state churn; claims are audited by the worker lease),
+    -- core.idempotency and core.rate_counter (hashes and counters only, deleted within 24 h).
     execute format('create trigger audit after insert or update or delete on core.%I for each row execute function audit.row_trigger()', t);
   end loop;
 end $$;
@@ -591,8 +632,8 @@ grant execute on function core.grant_role(uuid, text), core.revoke_role(uuid) to
 grant execute on function core.publish_media(uuid) to worker_c1;
 grant execute on function core.claim_job(text[], text), audit.bind_lease(text) to worker_c1, worker_c2, worker_c3;
 grant execute on function audit.bind_migration(text, text), audit.record_migration(text, text, text) to migrator;
-grant execute on function audit.write(text, text, text, jsonb), audit.row_trigger() to api_rt, worker_c1, worker_c2, worker_c3, migrator, core_owner;
-grant execute on function core.touch_updated_at() to api_rt, worker_c1, worker_c2, worker_c3, migrator;
+-- Trigger functions need no EXECUTE grant for the roles whose writes fire them (checked at trigger creation).
+grant execute on function audit.write(text, text, text, jsonb) to api_rt, worker_c1, worker_c2, worker_c3, migrator, core_owner;
 grant execute on function audit.pool_classes(name) to core_owner, audit_owner, worker_c1, worker_c2, worker_c3;
 grant usage on schema core to audit_owner;
 grant usage on schema audit to core_owner;
@@ -670,7 +711,8 @@ create policy provenance_insert on core.ai_provenance for insert to worker_c1, w
 grant insert on core.ai_provenance to worker_c1, worker_c2, worker_c3;
 
 -- data keys: each reader sees only keys up to its class
-create policy key_read on core.data_key for select to api_rt, worker_c2 using (data_class = 'C2');
+create policy key_read on core.data_key for select to api_rt using (data_class = 'C2' and core.is_staff());
+create policy key_read_c2 on core.data_key for select to worker_c2 using (data_class = 'C2');
 create policy key_read_c3 on core.data_key for select to worker_c3 using (true);
 grant select on core.data_key to api_rt, worker_c2, worker_c3;
 

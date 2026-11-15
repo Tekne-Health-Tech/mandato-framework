@@ -1,0 +1,11 @@
+{
+  "projection": "staff",
+  "version": 1,
+  "source": "core.app_user",
+  "where": "true",
+  "fields": {
+    "id": { "expr": "app_user.id", "class": "C0" },
+    "updated_at": { "expr": "app_user.updated_at", "class": "C0" },
+    "profile": { "expr": "to_jsonb(app_user)", "class": "C0" }
+  }
+}

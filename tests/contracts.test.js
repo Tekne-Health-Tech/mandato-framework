@@ -46,7 +46,7 @@ test('rejects a C2 module without a data-subject hook', () =>
   assert.equal(moduleManifest(json('tests/fixtures/negative/module-c2-without-data-subject.json')), false));
 test('rejects personal data in a job payload', () => assert.equal(jobRequest(json('tests/fixtures/negative/job-pii-payload.json')), false));
 
-test('every projection field is C0 and matches its schema', () => {
+test('every projection field is declared C0 and matches its schema (column classes are proven in run.sh)', () => {
   const dir = 'packages/core-publish/projections';
   const specs = readdirSync(new URL(`../${dir}`, import.meta.url)).filter((f) => f.endsWith('.json') && !f.endsWith('.schema.json'));
   assert.ok(specs.length >= 4);
@@ -59,5 +59,40 @@ test('every projection field is C0 and matches its schema', () => {
     }
     assert.deepEqual(Object.keys(spec.fields).sort(), Object.keys(schema.properties).sort(), f);
     assert.ok(schema.required.includes('id') && schema.required.includes('updated_at'), f);
+  }
+});
+
+// Semantic checks (verification stage 7): keyring, module authority, provider locality, module settings.
+import { checkModule, checkTenant } from '../packages/core-config/src/check.js';
+
+test('demo tenant passes the semantic checks', () => assert.deepEqual(checkTenant(yaml('tenants/demo/tenant.yaml')), []));
+test('rejects an ambiguous keyring', () => {
+  const t = yaml('tenants/demo/tenant.yaml');
+  t.publish_keys = [t.publish_keys[0], { ...t.publish_keys[0] }];
+  assert.ok(checkTenant(t).length > 0);
+  t.publish_keys = [t.publish_keys[0], { ...t.publish_keys[0], role: 'next' }];
+  assert.ok(checkTenant(t).some((p) => p.startsWith('duplicate publish key id')));
+});
+test('rejects a module claiming framework roles or permissions', () => {
+  const m = json('tests/fixtures/negative/module-authority-collision.json');
+  assert.equal(moduleManifest(m), true);   // syntactically fine, which is why the semantic check exists
+  assert.equal(checkModule(m).length, 2);
+  assert.deepEqual(checkModule(json('tenants/demo/modules/hello/mandato.module.json')), []);
+});
+test('rejects a local provider with external egress', () => {
+  const t = yaml('tenants/demo/tenant.yaml');
+  t.ai.providers = [{ id: 'fake', locality: 'local', max_data_class: 'C3', egress: ['api.external.example'] }];
+  assert.equal(tenant(t), false);
+  t.ai.providers = [{ id: 'ollama', locality: 'local', max_data_class: 'C3', egress: ['ollama.internal:11434'] }];
+  assert.equal(tenant(t), true, JSON.stringify(tenant.errors));
+});
+test('module settings in tenant.yaml match each local module settings_schema', () => {
+  const t = yaml('tenants/demo/tenant.yaml');
+  for (const m of t.modules.filter((x) => x.id.startsWith('demo.'))) {
+    const dir = `tenants/demo/modules/${m.id.split('.')[1]}`;
+    const manifest = json(`${dir}/mandato.module.json`);
+    assert.equal(manifest.id, m.id);
+    const v = ajv.compile(json(`${dir}/${manifest.settings_schema}`));
+    assert.ok(v(m.settings ?? {}), `${m.id}: ${JSON.stringify(v.errors)}`);
   }
 });

@@ -1,7 +1,7 @@
 import unittest
 
-from workers.core.contracts.ai import (AiRefused, ClassifiedPart, EchoProvider, NoneRouter, OperatorProvider,
-                                       _LOADER_TOKEN, check)
+from workers.core.contracts.ai import (AiGateway, AiRefused, ClassifiedPart, EchoProvider, FixedRouter, NoneProvider,
+                                       NoneRouter, OperatorProvider, check, column_part, text_part)
 from workers.core.contracts.classes import DataClass
 
 OPS = {
@@ -11,7 +11,7 @@ OPS = {
 
 
 def part(c: DataClass) -> ClassifiedPart:
-    return ClassifiedPart("text", "x", c, _token=_LOADER_TOKEN)
+    return column_part("x", c)   # through the public loader, as a module would get it
 
 
 class GuardTest(unittest.TestCase):
@@ -54,6 +54,57 @@ class GuardTest(unittest.TestCase):
     def test_echo_is_deterministic(self):
         r = EchoProvider().generate("demo.t", [part(DataClass.C0)], {})
         self.assertEqual(r.output, {"task": "demo.t", "parts": 1})
+
+
+class GatewayTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.prov = []
+        self.ops = {"echo": OperatorProvider("echo", "local", DataClass.C3, ()),
+                    "cloud": OperatorProvider("cloud", "external", DataClass.C1, ("api.example.com",))}
+
+    def gw(self, provider_id):
+        outer = self
+
+        class Spy(EchoProvider):
+            def generate(self, task, parts, schema):
+                outer.calls.append(task)
+                return super().generate(task, parts, schema)
+        spy = Spy()
+        spy.id = provider_id
+        return AiGateway(FixedRouter(provider_id), {provider_id: spy}, self.ops,
+                         lambda *a: (self.prov.append(a), "prov-1")[1])
+
+    def test_guard_runs_before_the_provider(self):
+        with self.assertRaises(AiRefused):
+            self.gw("cloud").generate("demo.t", DataClass.C1, [text_part("secret", DataClass.C2)], {})
+        self.assertEqual(self.calls, [])   # refused before any provider call
+
+    def test_allowed_call_writes_provenance_with_hash_only(self):
+        r = self.gw("echo").generate("demo.t", DataClass.C1, [text_part("conteúdo", DataClass.C1)], {})
+        self.assertEqual((r.provider_id, r.provenance_id), ("echo", "prov-1"))
+        task, pid, model, digest = self.prov[0]
+        self.assertEqual(len(digest), 64)
+        self.assertNotIn("conteúdo", repr(self.prov))
+
+    def test_raw_objects_are_not_parts(self):
+        with self.assertRaises(AiRefused):
+            self.gw("echo").generate("demo.t", DataClass.C0, ["plain string"], {})  # type: ignore[list-item]
+
+    def test_text_part_never_lowers_the_job_class(self):
+        self.assertEqual(text_part("x", DataClass.C2).data_class, DataClass.C2)
+        self.assertEqual(column_part("x", None).data_class, DataClass.C3)
+
+    def test_local_provider_with_external_egress_is_refused(self):
+        bad = {"fake": OperatorProvider("fake", "local", DataClass.C3, ("api.external.example",))}
+        with self.assertRaises(AiRefused):
+            check("demo.t", DataClass.C3, [], "fake", bad)
+        ok = {"ollama": OperatorProvider("ollama", "local", DataClass.C3, ("ollama.internal:11434",))}
+        self.assertEqual(check("demo.t", DataClass.C3, [], "ollama", ok)[1].id, "ollama")
+
+    def test_none_provider_refuses(self):
+        with self.assertRaises(AiRefused):
+            NoneProvider().generate("demo.t", [], {})
 
 
 if __name__ == "__main__":

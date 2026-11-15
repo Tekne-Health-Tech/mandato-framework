@@ -358,10 +358,10 @@ class ProviderRouter(Protocol):       # implemented in closed modules
     def route(self, task: str, effective_class: DataClass) -> str | None: ...   # returns a provider id
 
 class AiGateway:                      # framework-owned, not an extension point
-    def generate(self, task: str, parts: list[ClassifiedPart], output_schema: dict) -> AiResult: ...
+    def generate(self, task: str, job_class: DataClass, parts: list[ClassifiedPart], output_schema: dict) -> AiResult: ...
 ```
 
-- **Locality and class ceiling are operator data, not provider attributes.** `tenant.yaml` → `ai.providers[]` lists each provider id with `locality` (`local` | `external`), `max_data_class` and `egress` (the hostnames it may reach), set by the operator per instance. A provider not listed there cannot be used. The `ai` block is the one part of `tenant.yaml` that the operator controls and that is reviewed with the mandate's data controller.
+- **Locality and class ceiling are operator data, not provider attributes.** `tenant.yaml` → `ai.providers[]` lists each provider id with `locality` (`local` | `external`), `max_data_class` and `egress` (the hostnames it may reach), set by the operator per instance. A `local` provider may list only private egress hosts (`localhost`, `*.internal`, `*.local`, `*.lan`, RFC 1918 addresses); the schema and the guard both refuse anything else. A provider not listed there cannot be used. The `ai` block is the one part of `tenant.yaml` that the operator controls and that is reviewed with the mandate's data controller.
 - The gateway computes `effective_class = max(job class, every part's class)`, asks the router for a provider id, looks that id up in the operator list, and **refuses before any network call** when:
   - the router returns nothing;
   - the id is not in the operator list;
@@ -485,6 +485,7 @@ Artifacts, all in this repository:
 - `docs/api-conventions.md` (§9).
 - `packages/db/grants.md` (generated grant matrix), `packages/core-publish/projections/*.json` with their schemas, and the shared test vectors in `packages/crypto/vectors/` and `packages/core-publish/vectors/`.
 - The nine implementation tests in `egm/0001/stage6-cross-provider-codex-v4.md`; where each one runs, or which lane owns it, is in `egm/0001/implementation-tests.md`.
+- The answers to the independent verification of the implementation (`egm/0001/stage7-e00-verification-codex.md`) in `egm/0001/stage7-response.md`.
 - Adversarial SQL tests: self-grant, `aal1` reads, cross-pool column reads, audit writes without a lease, reuse of a lease after commit, and rewriting `audit.migration_log`.
 - Fixtures in `tenants/demo/`: valid `tenant.yaml`, neutral `theme/tokens.json`, seed with 4 staff users (one per framework role), 6 content items covering every state, 4 agenda events, 3 municipalities; a published `manifest.json` with two partitions, one takedown and one tombstoned record; `demo.hello` module with a route, a screen and a job. Synthetic data only.
 - Negative fixtures that CI must reject: a `tenant.yaml` with an unknown key, a token set failing contrast, a migration with an unclassified column, a publish attempt including a `pii_` column.

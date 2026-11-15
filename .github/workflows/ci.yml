@@ -34,6 +34,8 @@ jobs:
           python-version: "3.12"
       - name: Python worker contracts
         run: python -m unittest discover -s workers -t . -v
+      - name: AI boundary (static, §7.5)
+        run: scripts/check-ai-boundary.sh && ! scripts/check-ai-boundary.sh tests/fixtures/negative/ai-boundary
 
   database:
     name: Database contract (0001)

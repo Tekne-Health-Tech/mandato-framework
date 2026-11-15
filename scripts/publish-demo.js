@@ -26,6 +26,12 @@ export const takedownsSql = `select coalesce(json_agg(json_build_object('kind','
 const [cmd, a, b] = process.argv.slice(2);
 if (cmd === 'sql') {
   process.stdout.write(a === 'takedowns' ? takedownsSql : projectionSql(projection(a)));
+} else if (cmd === 'sql-unchecked') {
+  // For the database classification check only: builds SQL from any projection file without the JS lint,
+  // so the database itself must refuse a projection that reaches C2+ data.
+  const def = JSON.parse(readFileSync(a, 'utf8'));
+  const cols = Object.entries(def.fields).map(([n, f]) => `${f.expr} as "${n}"`).join(', ');
+  process.stdout.write(`select ${cols} from ${def.source}${def.join ? ` join ${def.join}` : ''} where ${def.where}`);
 } else if (cmd === 'build') {
   const tenant = parseYaml(read('tenants/demo/tenant.yaml'));
   const ajv = addFormats(new Ajv2020({ allErrors: true, strict: false }));
