@@ -48,7 +48,19 @@ equals "worker_c2 cannot read any C3 column" 0 sup "select count(*) from informa
 
 equals "a pre-existing runtime role loses dangerous attributes" 0 sup "select count(*) from pg_roles where rolname='worker_c1' and (rolbypassrls or rolcreatedb or rolcreaterole or rolsuper)"
 equals "a pre-existing runtime role loses foreign memberships" 0 sup "select count(*) from pg_auth_members am join pg_roles m on m.oid=am.member where m.rolname in ('api_rt','worker_c1','worker_c2','worker_c3')"
+equals "PostgREST exposes only api" "pgrst.db_schemas=api" sup "select array_to_string(setconfig, ',') from pg_db_role_setting s join pg_roles r on r.oid = s.setrole where r.rolname = 'authenticator' and s.setdatabase = 0"
 equals "anon/authenticated see no schema but api (PostgREST fail-closed)" 0 sup "select count(*) from pg_namespace n cross join (values ('anon'),('authenticated')) r(role) where has_schema_privilege(r.role, n.oid, 'USAGE') and n.nspname not in ('api','pg_catalog','information_schema','auth')"
+
+# Bootstrap refuses a contract role that holds grants outside the contract (here: SELECT on public.secrets).
+NEG=${DB}_neg
+psql -X -q -U postgres -d postgres -c "drop database if exists $NEG" -c "create database $NEG" >/dev/null 2>&1
+$PSQL -U postgres -d "$NEG" -f supabase-shim.sql >/dev/null
+$PSQL -U postgres -d "$NEG" -c "create table public.secrets (x text); grant usage on schema public to worker_c1; grant select on public.secrets to worker_c1" >/dev/null
+out=$($PSQL -U postgres -d "$NEG" -f ../migrations/0001_core.sql 2>&1 >/dev/null); rc=$?
+if [ $rc -ne 0 ] && echo "$out" | grep -q "bootstrap refused: contract roles hold privileges outside the contract.*public.secrets"; then
+  pass=$((pass+1)); echo "ok   - bootstrap refuses a pre-existing role with grants outside the contract"
+else fail=$((fail+1)); echo "FAIL - bootstrap refuses a pre-existing role with grants outside the contract: rc=$rc $out"; fi
+psql -X -q -U postgres -d postgres -c "drop database $NEG" >/dev/null
 
 echo "# access (aal2, staff)"
 equals "aal2 staff reads C1 content" 1 as api_rt "$(claims $COMM aal2)" "select count(*) from core.content_item"
@@ -81,7 +93,12 @@ fails "api_rt cannot call audit.bind_migration" as api_rt '{}' "select audit.bin
 
 fails "audit details refuse free text (an e-mail)" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"to\":\"pessoa@example.org\"}')"
 fails "audit details refuse personal data hidden in a key" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"fields\":{\"Maria Silva\":1}}')"
-ok "audit details accept ids and field names" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item','00000000-0000-7000-8000-0000000000c1','{\"fields\":[\"title\",\"summary\"]}')"
+fails "audit details refuse a personal value that looks like an identifier" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"patient\":\"mariasilva\"}')"
+fails "audit fields must be columns of the audited table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"fields\":[\"mariasilva\"]}')"
+fails "audit states must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item',null,'{\"to_state\":\"mariasilva\"}')"
+fails "audit actions must be registered" as api_rt "$(claims $CHIEF aal2)" "select audit.write('mariasilva','core.content_item',null,'{}')"
+fails "audit entity must be an existing table" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','maria.silva',null,'{}')"
+ok "audit details accept columns, ids, states and counts" as api_rt "$(claims $CHIEF aal2)" "select audit.write('note','core.content_item','00000000-0000-7000-8000-0000000000c1','{\"fields\":[\"state\",\"type\"],\"ids\":[\"00000000-0000-7000-8000-0000000000c1\"],\"from_state\":\"draft\",\"to_state\":\"in_review\",\"count\":1}')"
 ok "editor updates a content version (audited)" as api_rt "$(claims $COMM aal2)" "update core.content_version set summary = 'novo' where content_id = '00000000-0000-7000-8000-0000000000c1' and n = 1"
 equals "composite keys are recorded as entity_id" "00000000-0000-7000-8000-0000000000c1|1" sup "select entity_id from audit.event where entity='core.content_version' order by at desc limit 1"
 fails "a worker cannot update a C1 table without a bound lease" as worker_c1 '{}' "update core.data_source set cursor = '{}'::jsonb"

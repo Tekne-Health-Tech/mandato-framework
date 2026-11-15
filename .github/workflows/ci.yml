@@ -35,7 +35,7 @@ jobs:
       - name: Python worker contracts
         run: python -m unittest discover -s workers -t . -v
       - name: AI boundary (static, §7.5)
-        run: scripts/check-ai-boundary.sh && ! scripts/check-ai-boundary.sh tests/fixtures/negative/ai-boundary
+        run: python scripts/check_ai_boundary.py && ! python scripts/check_ai_boundary.py tests/fixtures/negative/ai-boundary
 
   database:
     name: Database contract (0001)

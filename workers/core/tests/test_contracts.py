@@ -87,6 +87,15 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(len(digest), 64)
         self.assertNotIn("conteúdo", repr(self.prov))
 
+    def test_a_failing_provider_call_is_still_recorded(self):
+        class Boom(EchoProvider):
+            def generate(self, task, parts, schema):
+                raise RuntimeError("provider failed after receiving the input")
+        gw = AiGateway(FixedRouter("echo"), {"echo": Boom()}, self.ops, lambda *a: (self.prov.append(a), "prov-1")[1])
+        with self.assertRaises(RuntimeError):
+            gw.generate("demo.t", DataClass.C2, [text_part("x", DataClass.C2)], {})
+        self.assertEqual(len(self.prov), 1)
+
     def test_raw_objects_are_not_parts(self):
         with self.assertRaises(AiRefused):
             self.gw("echo").generate("demo.t", DataClass.C0, ["plain string"], {})  # type: ignore[list-item]

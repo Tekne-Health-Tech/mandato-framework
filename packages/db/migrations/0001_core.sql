@@ -48,7 +48,7 @@ revoke all on schema core, audit, api from public;
 revoke create on schema public from public;
 revoke all on schema public from public, anon, authenticated;   -- PostgREST must see nothing outside `api` (§4.1)
 do $$ begin
-  -- Supabase's PostgREST reads its exposed schemas from this setting; pin it to `api` when the role exists.
+  -- Supabase's PostgREST reads its exposed schemas from this setting. Without the role, bootstrap fails at the end.
   if exists (select 1 from pg_roles where rolname = 'authenticator') then
     execute 'alter role authenticator set pgrst.db_schemas = ''api''';
   end if;
@@ -89,6 +89,16 @@ create table audit.tx_lease (
   kind      text        not null check (kind in ('worker','migration')),
   ref       text        not null,
   bound_at  timestamptz not null default now()
+);
+-- Closed vocabulary for audit actions, states and projection names (§4.5): free text cannot pass as an identifier.
+-- Framework terms are seeded here; a module registers its own through `mandato migrate` (audit.register_term).
+create table audit.term (
+  term        text        not null,
+  kind        text        not null check (kind in ('action','state','projection')),
+  module_id   text        not null,
+  created_at  timestamptz not null default now(),
+  primary key (kind, term),
+  check (term ~ '^[a-z][a-z0-9_.:-]{0,63}$')
 );
 create table audit.migration_log (
   module_id     text        not null,
@@ -461,16 +471,37 @@ create function core.is_staff() returns boolean language sql stable security def
 $$;
 
 -- ---------------------------------------------------------------- audit functions (§4.5)
--- Appendix A: `details` holds ids and field names only. Every key and every string value must be an identifier
--- or a uuid, so free text (names, e-mails, messages) cannot be written into the five-year trail.
-create function audit.details_ok(p jsonb) returns boolean language sql immutable
-  set search_path = pg_catalog, pg_temp as $$
-  select jsonb_typeof(p) = 'object'
-     and not exists (
-       select 1 from jsonb_path_query(p, 'strict $.**') v
-        where (jsonb_typeof(v) = 'string' and not (v #>> '{}') ~ '^([a-z][a-z0-9_.:-]{0,63}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
-           or (jsonb_typeof(v) = 'object' and exists (select 1 from jsonb_object_keys(v) k where k !~ '^[a-z][a-z0-9_]{0,63}$')))
+-- Appendix A: `details` holds ids and field names only. Allowed keys and what each may hold:
+--   fields: column names of the audited table; ids: uuids; from_state/to_state: registered states;
+--   projection: a registered projection; count: a number. Anything else is refused, so a value such as
+--   {"patient":"mariasilva"} or {"fields":["mariasilva"]} cannot reach the five-year trail.
+create function audit.details_ok(p jsonb, p_entity text) returns boolean language sql stable
+  set search_path = pg_catalog, audit, pg_temp as $$
+  select jsonb_typeof(p) = 'object' and not exists (
+    select 1 from jsonb_each(p) e(k, v)
+     where case e.k
+       when 'fields' then jsonb_typeof(e.v) <> 'array' or exists (
+              select 1 from jsonb_array_elements(e.v) x
+               where jsonb_typeof(x) <> 'string' or not exists (
+                 select 1 from pg_attribute a
+                  where a.attrelid = to_regclass(p_entity) and a.attnum > 0 and not a.attisdropped
+                    and a.attname = x #>> '{}'))
+       when 'ids' then jsonb_typeof(e.v) <> 'array' or exists (
+              select 1 from jsonb_array_elements(e.v) x
+               where (x #>> '{}') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$')
+       when 'from_state' then not exists (select 1 from audit.term t where t.kind = 'state' and t.term = e.v #>> '{}')
+       when 'to_state'   then not exists (select 1 from audit.term t where t.kind = 'state' and t.term = e.v #>> '{}')
+       when 'projection' then not exists (select 1 from audit.term t where t.kind = 'projection' and t.term = e.v #>> '{}')
+       when 'count' then jsonb_typeof(e.v) <> 'number'
+       else true end)
 $$;
+
+create function audit.register_term(p_kind text, p_term text, p_module_id text) returns void language plpgsql security definer
+  set search_path = pg_catalog, audit, pg_temp as $$
+begin
+  if session_user <> 'migrator' then raise exception 'audit: only migrator registers terms'; end if;
+  insert into audit.term (kind, term, module_id) values (p_kind, p_term, p_module_id) on conflict do nothing;
+end $$;
 
 create function audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb)
 returns void language plpgsql security definer set search_path = pg_catalog, audit, pg_temp as $$
@@ -493,12 +524,17 @@ begin
   else
     raise exception 'audit: role % may not write audit events', session_user;
   end if;
-  if not audit.details_ok(coalesce(p_details, '{}')) then
+  if to_regclass(p_entity) is null or p_entity !~ '^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$' then
+    raise exception 'audit: entity must be an existing schema.table';
+  end if;
+  if not exists (select 1 from audit.term t where t.kind = 'action' and t.term = p_action) then
+    raise exception 'audit: action % is not registered', p_action;
+  end if;
+  if not audit.details_ok(coalesce(p_details, '{}'), p_entity) then
     raise exception 'audit: details may hold ids and field names only';
   end if;
-  if p_action !~ '^[a-z][a-z0-9_.:-]{0,63}$' or p_entity !~ '^[a-z][a-z0-9_.]{0,63}$'
-     or (p_entity_id is not null and p_entity_id !~ '^[A-Za-z0-9_.:|-]{1,200}$') then
-    raise exception 'audit: action, entity and entity_id must be identifiers';
+  if p_entity_id is not null and p_entity_id !~ '^[A-Za-z0-9_.:|-]{1,200}$' then
+    raise exception 'audit: entity_id must be a row key';
   end if;
   insert into audit.event (actor_kind, actor_id, action, entity, entity_id, details, db_role)
   values (v_kind, v_id, p_action, p_entity, p_entity_id, coalesce(p_details, '{}'), session_user);
@@ -631,7 +667,7 @@ grant execute on function core.uuid7() to audit_owner, core_owner, migrator;
 grant execute on function core.grant_role(uuid, text), core.revoke_role(uuid) to api_rt;
 grant execute on function core.publish_media(uuid) to worker_c1;
 grant execute on function core.claim_job(text[], text), audit.bind_lease(text) to worker_c1, worker_c2, worker_c3;
-grant execute on function audit.bind_migration(text, text), audit.record_migration(text, text, text) to migrator;
+grant execute on function audit.bind_migration(text, text), audit.record_migration(text, text, text), audit.register_term(text, text, text) to migrator;
 -- Trigger functions need no EXECUTE grant for the roles whose writes fire them (checked at trigger creation).
 grant execute on function audit.write(text, text, text, jsonb) to api_rt, worker_c1, worker_c2, worker_c3, migrator, core_owner;
 grant execute on function audit.pool_classes(name) to core_owner, audit_owner, worker_c1, worker_c2, worker_c3;
@@ -741,6 +777,52 @@ insert into core.permission (id, label) values
 insert into core.role_permission (role_id, permission_id) values
   ('parlamentar', 'core.content.publish'), ('chefe_gabinete', 'core.content.publish'), ('chefe_gabinete', 'core.content.edit'),
   ('chefe_gabinete', 'core.agenda.edit'), ('comunicacao', 'core.content.edit'), ('comunicacao', 'core.agenda.edit');
+insert into audit.term (kind, term, module_id)
+  select 'action', t, 'core' from unnest(array['insert','update','delete','grant_role','revoke_role','publish','withdraw','claim','export','erase']) t
+  union all select 'state', t, 'core' from unnest(array['draft','in_review','approved','published','withdrawn','archived',
+    'planned','done','cancelled','public','internal','active','suspended','removed','queued','running','failed','succeeded']) t
+  union all select 'projection', t, 'core' from unnest(array['content','agenda','causes','municipalities']) t;
 set local session_replication_role = origin;
+
+-- ---------------------------------------------------------------- fail closed on what this file cannot reset (§4.1)
+-- Attributes and memberships were reset above. Direct grants or ownership that a pre-existing role holds outside the
+-- contract's schemas cannot be revoked safely by this file, so bootstrap refuses to finish until an operator removes them.
+do $$
+declare v_roles text[] := array['core_owner','audit_owner','audit_archiver','api_rt','worker_c1','worker_c2','worker_c3','migrator'];
+        v_found text;
+begin
+  select string_agg(distinct x, ', ') into v_found from (
+    select format('%s on %s.%s', a.privilege_type, n.nspname, c.relname) x
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace
+      cross join lateral aclexplode(c.relacl) a join pg_roles r on r.oid = a.grantee
+     where r.rolname = any(v_roles) and n.nspname not in ('core','audit','api') and n.nspname not like 'mod\_%'
+    union all
+    select format('%s on schema %s', a.privilege_type, n.nspname)
+      from pg_namespace n cross join lateral aclexplode(n.nspacl) a join pg_roles r on r.oid = a.grantee
+     where r.rolname = any(v_roles) and n.nspname not in ('core','audit','api') and n.nspname not like 'mod\_%'
+    union all
+    select format('%s on function %s', a.privilege_type, p.oid::regprocedure)
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      cross join lateral aclexplode(p.proacl) a join pg_roles r on r.oid = a.grantee
+     where r.rolname = any(v_roles) and n.nspname not in ('core','audit','api','auth') and n.nspname not like 'mod\_%'
+    union all
+    select format('owns %s.%s', n.nspname, c.relname)
+      from pg_class c join pg_namespace n on n.oid = c.relnamespace join pg_roles r on r.oid = c.relowner
+     where r.rolname = any(v_roles) and n.nspname not in ('core','audit','api','pg_toast') and n.nspname not like 'mod\_%'
+    union all
+    select format('%s on database %s', a.privilege_type, d.datname)
+      from pg_database d cross join lateral aclexplode(d.datacl) a join pg_roles r on r.oid = a.grantee
+     where d.datname = current_database() and r.rolname = any(v_roles) and a.privilege_type <> 'CONNECT'
+    union all
+    select format('default privileges of %s', r.rolname)
+      from pg_default_acl da join pg_roles r on r.oid = da.defaclrole where r.rolname = any(v_roles)
+  ) s;
+  if v_found is not null then
+    raise exception 'bootstrap refused: contract roles hold privileges outside the contract: %', v_found;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'authenticator') then
+    raise exception 'bootstrap refused: role authenticator (Supabase PostgREST) must exist so its exposed schemas can be pinned to api';
+  end if;
+end $$;
 
 commit;

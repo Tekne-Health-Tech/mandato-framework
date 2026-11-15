@@ -40,6 +40,7 @@
 | api_rt | core.uuid7() | EXECUTE |
 | migrator | audit.bind_migration(p_module_id text, p_migration_id text) | EXECUTE |
 | migrator | audit.record_migration(p_module_id text, p_migration_id text, p_sha256 text) | EXECUTE |
+| migrator | audit.register_term(p_kind text, p_term text, p_module_id text) | EXECUTE |
 | migrator | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | migrator | core.uuid7() | EXECUTE |
 | worker_c1 | audit.bind_lease(p_token text) | EXECUTE |

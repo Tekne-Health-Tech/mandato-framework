@@ -486,6 +486,7 @@ Artifacts, all in this repository:
 - `packages/db/grants.md` (generated grant matrix), `packages/core-publish/projections/*.json` with their schemas, and the shared test vectors in `packages/crypto/vectors/` and `packages/core-publish/vectors/`.
 - The nine implementation tests in `egm/0001/stage6-cross-provider-codex-v4.md`; where each one runs, or which lane owns it, is in `egm/0001/implementation-tests.md`.
 - The answers to the independent verification of the implementation (`egm/0001/stage7-e00-verification-codex.md`) in `egm/0001/stage7-response.md`.
+- The answers to the re-verification (`egm/0001/stage8-e00-reverification-codex.md`) in `egm/0001/stage8-response.md`.
 - Adversarial SQL tests: self-grant, `aal1` reads, cross-pool column reads, audit writes without a lease, reuse of a lease after commit, and rewriting `audit.migration_log`.
 - Fixtures in `tenants/demo/`: valid `tenant.yaml`, neutral `theme/tokens.json`, seed with 4 staff users (one per framework role), 6 content items covering every state, 4 agenda events, 3 municipalities; a published `manifest.json` with two partitions, one takedown and one tombstoned record; `demo.hello` module with a route, a screen and a job. Synthetic data only.
 - Negative fixtures that CI must reject: a `tenant.yaml` with an unknown key, a token set failing contrast, a migration with an unclassified column, a publish attempt including a `pii_` column.
@@ -743,6 +744,15 @@ In C0 tables these two columns are C0.
 | `cursor` | `jsonb` | Y | | C1 | |
 | `created_at` | `timestamptz` | N | `now()` | C1 | |
 | `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
+
+`audit.term` (C1: closed vocabulary for audit actions, states and projection names; framework terms seeded by 0001, module terms registered by `migrator` through `audit.register_term`)
+
+| Column | Type | Null | Default | Class | Key / notes |
+| --- | --- | --- | --- | --- | --- |
+| `term` | `text` | N | | C1 | PK part, identifier |
+| `kind` | `text` | N | | C1 | PK part, `action` \| `state` \| `projection` |
+| `module_id` | `text` | N | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
 
 `core.data_source_run` (C1)
 

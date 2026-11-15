@@ -111,7 +111,7 @@ def check(task: str, job_class: DataClass, parts: list[ClassifiedPart], provider
 LOCAL_HOST = re.compile(r"^(localhost|[a-z0-9-]+(\.[a-z0-9-]+)*\.(internal|local|lan)|10(\.[0-9]{1,3}){3}"
                         r"|192\.168(\.[0-9]{1,3}){2}|172\.(1[6-9]|2[0-9]|3[01])(\.[0-9]{1,3}){2})(:[0-9]+)?$")
 
-ProvenanceWriter = Callable[[str, str, str, str], str]   # (task, provider_id, model, input_sha256) -> provenance id
+ProvenanceWriter = Callable[[str, str, str, str], str]   # (task, provider_id, model or '', input_sha256) -> provenance id
 
 
 class AiGateway:
@@ -138,8 +138,9 @@ class AiGateway:
             raise AiRefused(f"provider {provider_id} is not registered with the gateway")
         digest = hashlib.sha256(json.dumps([p.kind for p in parts] + [p._content for p in parts],
                                            ensure_ascii=False).encode("utf-8")).hexdigest()
+        # Provenance is written before the provider sees anything, so a call that fails midway is still recorded.
+        provenance_id = self._write(task, provider_id, "", digest)  # type: ignore[arg-type]
         result = provider.generate(task, parts, output_schema)
-        provenance_id = self._write(task, provider_id, result.model, digest)  # type: ignore[arg-type]
         return AiResult(result.output, provider_id, result.model, result.tokens_in, result.tokens_out, provenance_id)
 
 

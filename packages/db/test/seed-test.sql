@@ -27,4 +27,6 @@ insert into core.data_source (source_id, name, terms_url, cadence) values
 insert into core.data_key (key_id, purpose, data_class, version, enc_wrapped_key) values
   ('00000000-0000-7000-8000-0000000000b2', 'pii', 'C2', 1, '\x00'),
   ('00000000-0000-7000-8000-0000000000b3', 'phi', 'C3', 1, '\x00');
+insert into audit.term (kind, term, module_id) values
+  ('action', 'note', 'test'), ('action', 'test', 'test'), ('action', 'actor-c2', 'test'), ('action', 'actor-c3', 'test'), ('action', 'actor-mig', 'test');
 set session_replication_role = origin;
