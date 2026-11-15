@@ -1,7 +1,7 @@
 # Design 0001 — Core contracts (backlog E0.0)
 
-Status: **v3, revised after the cross-provider review** · 2026-11-15 · Owner: architecture backbone
-Reviews: v1 → [`egm/0001/REPORT.md`](egm/0001/REPORT.md) (Elephant-Goldfish method, Claude reviewers); v2 → [`egm/0001/stage4-cross-provider-codex.md`](egm/0001/stage4-cross-provider-codex.md) (Codex). Section 10 maps every blocker and major finding to its answer.
+Status: **v4, revised after the second cross-provider review** · 2026-11-15 · Owner: architecture backbone
+Reviews: v1 → [`egm/0001/REPORT.md`](egm/0001/REPORT.md) (Elephant-Goldfish method, Claude reviewers); v2 → [`egm/0001/stage4-cross-provider-codex.md`](egm/0001/stage4-cross-provider-codex.md) (Codex); v3 → [`egm/0001/stage5-cross-provider-codex-v3.md`](egm/0001/stage5-cross-provider-codex-v3.md) (Codex). Section 10 maps every blocker and major finding to its answer.
 
 ## 1. Problem
 
@@ -52,10 +52,12 @@ Runtime roles (all `NOBYPASSRLS`, `NOSUPERUSER`, `NOCREATEROLE`, `NOINHERIT` unl
 | --- | --- | --- |
 | `anon`, `authenticated` (Supabase) | PostgREST, realtime | `USAGE` on `api` only. `revoke all` on `core`, `audit`, `mod_*` and `public`. |
 | `api_rt` (LOGIN) | Next.js API | Table rights granted per table in the migration. Every request runs in a transaction that sets `request.jwt.claims` from the verified user JWT, so RLS and `core.has_role` see the end user. Public, unauthenticated endpoints use the anonymous claim and reach only the tables a policy opens to it. |
-| `worker_rt` (LOGIN) | Python workers | Table rights granted per job need; RLS policies name `worker_rt` explicitly. |
+| `worker_c1`, `worker_c2`, `worker_c3` (LOGIN) | Python worker pools, one per data class (§7.5) | A pool's role can read columns up to its class and no higher: `worker_c1` has no `select` on any C2/C3 column, `worker_c2` none on C3. RLS policies name these roles explicitly, by table; they do not use `has_role`, because workers carry no user JWT. |
 | `migrator` (LOGIN) | `mandato migrate` at boot only | `SET ROLE` to `core_owner` or one `mod_<short>_owner` per step; never used by request paths. |
 
 - Supabase's `service_role` and the database superuser are used only by the instance bootstrap and the operator runbook, never by the API or workers. CI inspects the migration result: grants per role, `rolbypassrls = false` for every runtime role, no `SECURITY DEFINER` in `api`, and the exposed-schema setting equal to `api`.
+- The exact role × table × verb grant matrix is generated from the migrations into `packages/db/grants.md` and checked in CI against two rules: no runtime role reads a column above its class, and nothing is granted that no lane needs. The matrix is an E0.0 deliverable (§11), not prose here.
+- Runtime roles run with `statement_timeout = 60s` and `idle_in_transaction_session_timeout = 5min`, so no transaction lives longer than 5 minutes. Key rotation relies on that bound (§4.6).
 - `core.has_role(role text)` is `SECURITY DEFINER`, owned by `core_owner`, `set search_path = pg_catalog, core, pg_temp`. It returns true only when the JWT carries `aal = 'aal2'`, the caller's `app_user.status = 'active'`, the role's module is enabled, and an active (`revoked_at is null`) assignment exists. Every RLS policy on C1+ tables goes through it, so a password-only session reads nothing beyond C0.
 - "Staff" means any principal with at least one active `role_assignment`. Citizens never get a Supabase account in P1.
 - `app_user.id` equals `auth.users.id` (Supabase-generated UUIDv4). It is the only table whose id is not UUIDv7.
@@ -87,8 +89,17 @@ Every column has `COMMENT ON COLUMN … IS 'class=Cn'` exactly as in Appendix A.
 ### 4.5 Audit
 
 - Table `audit.event` lives in its own schema, owned by `audit_owner`, a `NOLOGIN` role that is never used by the API, workers or migrations of other schemas. Nobody else owns or can alter it.
-- Writes go only through `audit.write(kind, action, entity, entity_id, details)`, `SECURITY DEFINER` owned by `audit_owner`, granted `EXECUTE` to `api_rt`, `worker_rt` and the owner roles' row triggers. `revoke update, delete, truncate` from everyone, plus `before update or delete` and `before truncate` triggers that raise, as defense in depth.
-- **Actor identity is derived, not declared.** `audit.write` records `current_user` (the database role) and, for `api_rt`, `auth.uid()` from the verified JWT. For `worker_rt`, the actor is the job lease: `core.claim_job()` (§7.4) stores `pg_backend_pid()` in `job.locked_pid`, and `audit.write` looks up the running job held by the current backend. A worker cannot name itself as another actor, and any `set_config('app.actor', …)` is ignored. Migrations record `migration:<module_id>:<migration_id>` from `core.migration_log` (§7.2).
+- Writes go only through `audit.write(action, entity, entity_id, details)`, `SECURITY DEFINER` owned by `audit_owner`, `set search_path = pg_catalog, audit, pg_temp`, `EXECUTE` granted to the runtime roles and the owner roles' row triggers. There is no `kind` or actor parameter. `revoke update, delete, truncate` from everyone, plus `before update or delete` and `before truncate` triggers that raise, as defense in depth.
+- **Actor identity is derived, not declared.** Inside a `SECURITY DEFINER` function `current_user` is the function owner, so `audit.write` uses `session_user`, the role that logged in, which the function cannot change. It derives the actor from that role:
+
+| `session_user` | `actor_kind` | `actor_id` | If missing |
+| --- | --- | --- | --- |
+| `api_rt` | `user` | `auth.uid()` from the verified JWT claims, or `anon` for public writes | — |
+| `worker_c1/c2/c3` | `worker` | the job bound to the current transaction in `audit.tx_lease` | raise |
+| `migrator` | `migration` | the migration bound to the current transaction in `audit.tx_lease` | raise |
+| anything else | — | — | raise |
+
+- **Leases bind to a transaction, not a connection.** `core.claim_job()` (§7.4) generates a 128-bit random lease token, stores only its SHA-256 in `job.lease_hash`, and returns the token to the worker. At the start of every transaction the worker calls `audit.bind_lease(token)`. That function is `SECURITY DEFINER` owned by `audit_owner`. It checks that the token matches exactly one `running` job whose queue belongs to the caller's pool, then inserts `(pg_current_xact_id(), job_id)` into `audit.tx_lease`, a table no other role can read or write. `audit.write` looks up `pg_current_xact_id()`. The transaction id is never reused while that transaction is open, so pooled connections and shared backends cannot inherit another job's identity. No binding, or more than one, means the write fails. `mandato migrate` binds each migration the same way through `audit.bind_migration()`.
 - Row triggers on C1+ tables call `audit.write` with ids and field names, never values.
 - Retention: 5 years (to be confirmed with the mandate's legal advisers). Archival runs only as `audit_archiver`, a separate `NOLOGIN` role used through one audited procedure that copies a closed year to write-once storage, verifies the copy's hash and only then deletes that year. The procedure itself writes an audit event that is never archived with the year it removes.
 
@@ -96,12 +107,12 @@ Every column has `COMMENT ON COLUMN … IS 'class=Cn'` exactly as in Appendix A.
 
 - **Ciphertext envelope** (`bytea`): `version (1 byte = 0x01) | key_id (16 bytes) | nonce (24 bytes, CSPRNG) | ciphertext+tag`. Algorithm: XChaCha20-Poly1305-IETF (libsodium). AAD: `<instance slug>|<schema>.<table>.<column>|<row id>`, which prevents moving ciphertext between rows or instances; it is why ids are generated by the application.
 - **Key registry** `core.data_key` (Appendix A): one data key (DEK) per `<table>.<column>` and version. Each DEK is stored wrapped by the instance KEK with XChaCha20-Poly1305, AAD `<instance slug>|dek|<purpose>|<key_id>`, so a wrapped key cannot be substituted under another id or purpose. States: `active` (one per purpose, enforced by a partial unique index), `decrypt_only`, `retired`.
-- **KEK**: lives in the instance secret store, loaded only by the API and worker processes, never by browsers, apps or the database.
+- **KEK**: versioned (`kek_id`) in the instance secret store, loaded only by the API and worker processes, never by browsers, apps or the database. A wrapped DEK uses the same envelope as data (`version | kek_id | nonce (24 bytes, CSPRNG) | ciphertext+tag`). KEK rotation unwraps and rewraps every DEK in one transaction, which is cheap because data is not touched. **Recovery:** at instance creation, the KEK is also exported once, encrypted to the public keys of two named people of the mandate (age, 2-of-2 not required, either can restore), and stored offline by the mandate. Without one of these copies, encrypted data cannot be recovered after the loss of the secret store.
 - **Rotation**:
   1. Create a new `active` DEK; the old one becomes `decrypt_only` in the same transaction.
   2. Wait until every API and worker process has reloaded the registry; processes reload on each transaction and refuse to encrypt with a non-`active` key.
   3. A re-encryption job rewrites rows in batches.
-  4. A verification scan runs twice, the second after a pause longer than the longest transaction, and must find zero references to the old `key_id`.
+  4. A verification scan runs twice, the second at least 10 minutes after the first (twice the 5-minute transaction bound in §4.1), and must find zero references to the old `key_id`.
   5. Only then does the key become `retired`. Wrapped bytes are kept until the backup retention window has passed, so restores still decrypt.
 - **Blind indexes**: `bi_<col> = version (1 byte) | HMAC-SHA256(index_key[version], normalize_v[version](value))`.
   - The index key and the normalization version travel together. Rotation uses dual write (`bi_<col>` and `bi_<col>_next`, both unique), a backfill under a lock on new registrations, a switch of lookups, then removal of the old column.
@@ -146,7 +157,8 @@ modules:                           # a list; order does not matter
   - { id: core.content }
   - { id: core.agenda }
   - { id: demo.hello, settings: { greeting: "Olá" } }
-publish_public_key: "ed25519:MCowBQYDK2VwAyEA…"   # verifies manifest.json in the app (§6.3)
+publish_keys:                      # manifest verification keyring compiled into the app (§6.3)
+  - { key_id: "2026-11", role: current, public_key: "ed25519:MCowBQYDK2VwAyEA…" }
 ai:                                # operator-owned (§7.5); reviewed with the data controller
   providers:
     - { id: echo, locality: local, max_data_class: C3, egress: [] }
@@ -178,7 +190,10 @@ CI rejects a projection whose output field is not C0, whose source column is C2+
 | --- | --- | --- |
 | `content` | `content_item.state = 'published' and deleted_at is null`, joined to `content_version` with `n = content_item.published_version` | `id`, `updated_at`, `type`, `published_at`, `title`, `summary`, `body_md`, `figures`, `causes[]`, `media[]`, `ai_label` |
 | `agenda` | `visibility = 'public' and status <> 'cancelled' and deleted_at is null` | `id`, `updated_at`, `starts_at`, `ends_at`, `title`, `kind`, `municipality_ibge`, `place` |
-| `causes`, `municipalities`, `institutional` | all rows | all Appendix A columns of those C0 tables except timestamps |
+| `causes` | all rows | `id` ← `slug`, `updated_at`, `name`, `icon`, `sort` |
+| `municipalities` | all rows | `id` ← `ibge_code`, `updated_at`, `name`, `uf`, `health_region`, `population`, `population_ref_date` |
+
+Every projection has a JSON Schema in `packages/core-publish/projections/<name>.schema.json` that requires `id` (string) and `updated_at` (RFC 3339) and lists every other output field. Institutional pages are not a projection in v1; they arrive with the content type that defines them.
 
 - The declassification act is the transition to `published` (content) or to `visibility = 'public'` (agenda). It requires the `core.content.publish` permission, a different approver than the author for content, and it writes an audit event naming the projection version.
 - The bundle writer validates every record again against the projection's JSON Schema before upload, and refuses unknown fields.
@@ -203,9 +218,14 @@ CI rejects a projection whose output field is not C0, whose source column is C2+
 }
 ```
 
-- **Partitions are stable**: content and agenda by month of `published_at`/`starts_at` (`content-YYYY-MM`, `agenda-YYYY-MM`); `causes`, `institutional`, `municipalities` single; indicators one per `source_id`. A new item changes one partition, not every page.
+- **Partitions are stable**: content and agenda by month of `published_at`/`starts_at` (`content-YYYY-MM`, `agenda-YYYY-MM`); `causes` and `municipalities` single; indicators one per `source_id`. A new item changes one partition, not every page.
 - **Bundle URLs are content-addressed and immutable** (`b/<sha256>.json`, cached forever). Only `manifest.json` is mutable: `Cache-Control: max-age=60`, ETag. The publisher uploads all bundles first and the manifest last.
-- **The manifest is signed.** `manifest.json` carries `signature` (Ed25519 over the canonical JSON without that field). The instance's publish key is in the secret store; its public key is compiled into the app build from `tenant.yaml` (`publish_public_key`). A manifest that fails verification is ignored.
+- **The manifest is signed.**
+  - **Format:** `manifest.json` carries `sig: { key_id, alg: "Ed25519", value }`, where `value` is base64url without padding. The signature covers the manifest without `sig`, canonicalized with **RFC 8785 (JCS)**. Shared test vectors in `packages/core-publish/vectors/` must pass in the publisher (TypeScript) and in the app.
+  - **Keyring:** the app build embeds a keyring of up to two public keys, `current` and `next`, taken from `tenant.yaml` `publish_keys[]`. A manifest signed by either key is accepted.
+  - **Rotation:** ship a build containing the new key as `next`, wait until that build reaches `min_app_version`, then start signing with it. A signed manifest may also carry `keyring_update`, signed by a current key, that adds a new `next` key or revokes one. Devices that are offline through two rotations need an app update.
+  - **Freshness:** the manifest carries `expires_at`, at most 7 days after `generated_at`, and the publisher re-signs at least daily. The app ignores expired manifests and keeps showing cached data. The build also embeds `min_generation_at_build`, so a fresh install rejects anything older than the build.
+  - A manifest that fails verification is ignored.
 - Each bundle is the **full snapshot** of its partition. A record absent from a partition no longer exists there.
 - `takedowns[]` keeps the last 365 days of withdrawals so a device can purge a record even before it refetches that partition. `min_generation` is raised whenever a partition is removed entirely.
 - Unknown fields are ignored by clients. A breaking bundle change raises `schema_version` and `min_app_version`.
@@ -267,7 +287,7 @@ Boot (API and workers): validate `tenant.yaml` → load generated registry → `
 - Each module step runs after `SET ROLE mod_<short>_owner` with `set search_path = mod_<short>, pg_temp`.
 - Module owner roles are `NOLOGIN NOINHERIT NOBYPASSRLS`. They hold `CREATE` only on their own schema and `REFERENCES` on the `core` columns listed in Appendix A as referenceable (`id` columns). They have no `CREATE` on `public`, `core` or `api`.
 - A module migration may not create `SECURITY DEFINER` functions, event triggers, extensions or roles. The migrator parses each file and rejects these statements before running it.
-- Every applied file is recorded in `core.migration_log (module_id, migration_id, sha256, applied_at)`, append-only. On boot, a recorded migration whose file hash differs aborts boot. Migrations are forward-only.
+- Every applied file is recorded in `audit.migration_log (module_id, migration_id, sha256, applied_at)` through `audit.record_migration()`. The table is owned by `audit_owner`, has raising update/delete/truncate triggers, and no role that `migrator` can assume owns it, so history cannot be rewritten by a migration. On boot, a recorded migration whose file hash differs aborts boot. Migrations are forward-only.
 
 Licensing of combined builds (closed modules statically bundled with the AGPL framework) relies on Tekne being the sole copyright holder of the framework: Tekne licenses the framework to each contracting mandate on terms that cover the combination, alongside the public AGPL. This is recorded for alignment with legal advisers; it does not change this contract.
 
@@ -293,7 +313,7 @@ Synchronous. The runner owns the transaction, stores the returned cursor in `dat
 
 ### 7.4 Jobs and the queue (`job` table, `schema/job.schema.json`)
 
-`core.job` columns are in Appendix A. Workers take work only through `core.claim_job(queues text[])`, which uses `select … for update skip locked`, sets `state = 'running'`, `locked_by`, `locked_at` and `locked_pid = pg_backend_pid()`, and returns the job. The audit actor of a worker transaction is that job (§4.5).
+`core.job` columns are in Appendix A. Workers take work only through `core.claim_job(queues text[])`, which uses `select … for update skip locked` limited to the queues of the caller's pool, sets `state = 'running'`, `locked_by` and `locked_at`, stores the SHA-256 of a fresh 128-bit lease token in `lease_hash`, and returns the job with the token. Every transaction of that job starts with `audit.bind_lease(token)` (§4.5). Jobs classed C0 or C1 run in the `c1` pool.
 
 Payloads carry **references** (ids, storage keys), never C2/C3 plaintext. A CI test rejects payload schemas with `pii_`/`phi_`/`piim_` property names.
 
@@ -346,8 +366,12 @@ class AiGateway:                      # framework-owned, not an extension point
   - the id is not in the operator list;
   - `effective_class` is above that entry's `max_data_class`;
   - `effective_class == C3` and the entry is not `local`.
-- **The network is the hard boundary.** Provider calls leave the worker only through the instance egress proxy, whose allow-list is generated from `ai.providers[].egress`. Workers that run C3 jobs run in a separate pool whose network reaches only the hosts of `local` providers. A provider that lies about where it sends data hits the proxy and fails.
-- **Static checks back this up.** CI fails when a module imports a provider SDK (`anthropic`, `openai`, `google.genai`, `httpx`/`requests` toward non-local hosts) outside its `providers` package, or when module code instantiates a provider directly. Parts can only be built through the loaders above.
+- **Isolation is the hard boundary, not code.**
+  - **Workers have no internet egress at all.** Worker containers can reach only the database, object storage and the provider sidecars of their pool.
+  - **Every provider runs as its own sidecar process,** with its own network identity, and only that sidecar may reach its `egress` hosts. Provider adapter code from closed modules runs inside the sidecar, not in the worker. The sidecar enforces its own `max_data_class` from the operator list on every request and records provenance.
+  - **There is one worker pool per data class** (`c1`, `c2`, `c3`). Each pool has its own database role, which cannot read columns above that class (§4.1). Each pool's network reaches only the sidecars cleared for that class: the C3 pool reaches only `local` sidecars, and the C2 pool only sidecars with `max_data_class ≥ C2`. A job runs in the pool of its `data_class`.
+  - **Residual risk, stated plainly:** code in a C2 pool could still mislabel C2 data and send it to a sidecar cleared for C2. That is allowed anyway. Code in the C1 pool cannot read C2 data, because the database refuses. So mislabeling inside the process can no longer move data above the ceiling that the operator set.
+- **Static checks are defense in depth.** CI fails when a module imports a provider SDK (`anthropic`, `openai`, `google.genai`, `httpx`/`requests` toward non-local hosts) outside its `providers` package, or when module code instantiates a provider directly. Parts can only be built through the loaders above.
 - `task` is `<module short>.<task>`.
 - The framework ships `NoneRouter` (always nothing) and `EchoProvider` (deterministic, local, for CI and the demo; contains no prompts). Real routers, providers and prompts live in closed modules and are listed in the module's `worker.providers`.
 - Every call that reaches a provider writes `core.ai_provenance` with `prompt_ref` and `input_sha256`, never prompt or input text.
@@ -425,7 +449,7 @@ Routes and screens are guarded by **permission**, not role, so a mandate can rea
 | CP-04 grants and runtime roles | §4.1 runtime roles, `NOBYPASSRLS`, per-request JWT claims, revokes, CI on grants |
 | CP-05 role administration | §4.4 no direct DML; `grant_role`/`revoke_role` specification and adversarial tests |
 | CP-06 audit owner can rewrite | §4.5 separate `audit` schema and `audit_owner`, raising triggers, separate archiver |
-| CP-07 settable actor | §4.5 actor derived from role, JWT, job lease (`locked_pid`) and migration log |
+| CP-07 settable actor | §4.5 actor derived from `session_user`, JWT and a per-transaction lease |
 | CP-08 key registry and rotation | §4.6 `core.data_key`, authenticated wrapping, states, rotation steps |
 | CP-09 blind-index lifecycle | §4.6 versioned index and normalization, dual write, shared test vectors |
 | CP-10 migration role and integrity | §7.2 role attributes, forbidden statements, `core.migration_log` with hashes |
@@ -433,6 +457,21 @@ Routes and screens are guarded by **permission**, not role, so a mandate can rea
 | CP-12 rollback and takedowns | §6.3 signed manifest, generation must not decrease, takedowns before version gate, expiry rule |
 | CP-13 idempotency store | §9 minimal receipt, hashed keys, 24 h deletion, no echo |
 | CP-14 rate limiting | §9 trusted IP header, IPv6 /64, layered quotas, body limit, challenge, uniform responses |
+
+| Finding (v3 cross-provider review) | Change in v4 |
+| --- | --- |
+| NEW-1 actor under `SECURITY DEFINER` | §4.5 `session_user`, no `kind` parameter, per-transaction lease bound by token in `audit.tx_lease` |
+| NEW-2 projections vs record shape | §6.2 `id` aliases, `updated_at` in every projection, one JSON Schema per projection, `institutional` removed |
+| NEW-3 manifest signature | §6.3 RFC 8785, `sig.key_id`, keyring with `current`/`next`, signed `keyring_update`, `expires_at`, `min_generation_at_build` |
+| NEW-4 shared egress | §7.5 no worker egress, one sidecar per provider with its own egress, one worker pool and DB role per class |
+| CP-01 partly | Appendix A repeats common columns per table; `data_source` classed C1 |
+| CP-03 partly | NEW-4 |
+| CP-04 partly | §4.1 class-bound worker roles, grant matrix as a CI-checked E0.0 artifact, transaction time bounds |
+| CP-07 partly | NEW-1 |
+| CP-08 partly | §4.6 wrapped-DEK envelope, KEK versioning, rotation and offline recovery copy; scan pause tied to the 5-minute bound |
+| CP-10 partly | §7.2 `audit.migration_log` owned by `audit_owner` |
+| CP-11 partly | NEW-2 |
+| CP-12 partly | NEW-3 |
 
 Minor items were applied in place (`settings_schema`, list form of `modules`, `cause` naming, one home for cause icons, `labels.ai_assisted`, figures on all numbers, contrast in both modes, SQL `uuid7()`, IBGE key, single `instance` row, secret refs, `flags` removed, `demo.hello` example, `Screen.tab` removed).
 
@@ -446,7 +485,9 @@ Artifacts, all in this repository:
 - Fixtures in `tenants/demo/`: valid `tenant.yaml`, neutral `theme/tokens.json`, seed with 4 staff users (one per framework role), 6 content items covering every state, 4 agenda events, 3 municipalities; a published `manifest.json` with two partitions, one takedown and one tombstoned record; `demo.hello` module with a route, a screen and a job. Synthetic data only.
 - Negative fixtures that CI must reject: a `tenant.yaml` with an unknown key, a token set failing contrast, a migration with an unclassified column, a publish attempt including a `pii_` column.
 
-Done when CI passes on those artifacts and someone other than the executor verifies them against this document. The `tenants/demo/` fixtures belong to the backbone.
+Done when CI passes on those artifacts and someone other than the executor verifies them against this document.
+
+**Stopping rule for design review.** After v4, one last cross-provider pass checks only the security items (§4.1, §4.5, §4.6, §6.3, §7.5). Blockers found there are fixed in the design. Anything else becomes an executable test of the E0.0 implementation instead of another design round, because a failing test settles these questions faster than more prose. The `tenants/demo/` fixtures belong to the backbone.
 
 Contracts are versioned `0.x` until launch. After freeze, a change goes through a backbone decision recorded in this file's history, bumps the contract's version, and updates fixtures in the same PR.
 
@@ -468,7 +509,7 @@ Closed-module schemas, AI routing tables and prompts, state connectors, and the 
 
 Legend: **Null** `N` = `not null`, `Y` = nullable. **Class** is the `class=` comment. FK actions are `on delete restrict` unless shown. `ref` marks the `core` columns that module owner roles may `REFERENCES` (§7.2).
 
-**Common columns, present on every table below except `audit.event`, `core.migration_log`, `core.idempotency` and `core.rate_counter`:**
+**Common columns, present on every table below except `audit.*`, `core.idempotency` and `core.rate_counter`; they are also repeated in each table for exactness:**
 
 | Column | Type | Null | Default | Class |
 | --- | --- | --- | --- | --- |
@@ -490,6 +531,8 @@ In C0 tables these two columns are C0.
 | `uf` | `char(2)` | N | | C0 | |
 | `config_version` | `text` | N | | C0 | |
 | `framework_version` | `text` | N | | C0 | |
+| `created_at` | `timestamptz` | N | `now()` | C0 | |
+| `updated_at` | `timestamptz` | N | `now()` | C0 | set by trigger |
 
 `core.app_user` (C2)
 
@@ -501,6 +544,8 @@ In C0 tables these two columns are C0.
 | `bi_email` | `bytea` | N | | C1 | unique |
 | `bi_email_next` | `bytea` | Y | | C1 | unique; used only during rotation |
 | `status` | `text` | N | `'active'` | C1 | `check in ('active','suspended','removed')` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.role` (C1)
 
@@ -509,6 +554,8 @@ In C0 tables these two columns are C0.
 | `id` | `text` | N | | C1 | PK, ref |
 | `label` | `text` | N | | C1 | |
 | `module_id` | `text` | Y | | C1 | FK `module_registry.module_id`; null for framework roles |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.permission` (C1)
 
@@ -517,6 +564,8 @@ In C0 tables these two columns are C0.
 | `id` | `text` | N | | C1 | PK |
 | `label` | `text` | N | | C1 | |
 | `module_id` | `text` | Y | | C1 | FK `module_registry.module_id` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.role_permission` (C1)
 
@@ -524,6 +573,8 @@ In C0 tables these two columns are C0.
 | --- | --- | --- | --- | --- | --- |
 | `role_id` | `text` | N | | C1 | PK part, FK `role.id` on delete cascade |
 | `permission_id` | `text` | N | | C1 | PK part, FK `permission.id` on delete cascade |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.role_assignment` (C1)
 
@@ -536,6 +587,8 @@ In C0 tables these two columns are C0.
 | `granted_at` | `timestamptz` | N | `now()` | C1 | |
 | `revoked_by` | `uuid` | Y | | C1 | FK `app_user.id` |
 | `revoked_at` | `timestamptz` | Y | | C1 | partial unique (`user_id`, `role_id`) where `revoked_at is null` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `audit.event` (C1, append-only, §4.5)
 
@@ -551,6 +604,15 @@ In C0 tables these two columns are C0.
 | `entity_id` | `text` | Y | | C1 | |
 | `details` | `jsonb` | N | `'{}'` | C1 | ids and field names only |
 
+`audit.tx_lease` (C1, owned by `audit_owner`, no grants to any other role)
+
+| Column | Type | Null | Default | Class | Key / notes |
+| --- | --- | --- | --- | --- | --- |
+| `txid` | `xid8` | N | `pg_current_xact_id()` | C1 | PK |
+| `kind` | `text` | N | | C1 | `check in ('worker','migration')` |
+| `ref` | `text` | N | | C1 | job id or `<module_id>:<migration_id>` |
+| `bound_at` | `timestamptz` | N | `now()` | C1 | rows older than 1 h are purged |
+
 ### Content and agenda
 
 `core.cause` (C0)
@@ -561,6 +623,8 @@ In C0 tables these two columns are C0.
 | `name` | `text` | N | | C0 | |
 | `icon` | `text` | N | | C0 | |
 | `sort` | `smallint` | N | `0` | C0 | |
+| `created_at` | `timestamptz` | N | `now()` | C0 | |
+| `updated_at` | `timestamptz` | N | `now()` | C0 | set by trigger |
 
 `core.content_item` (C1)
 
@@ -575,6 +639,8 @@ In C0 tables these two columns are C0.
 | `author_id` | `uuid` | N | | C1 | FK `app_user.id` |
 | `approver_id` | `uuid` | Y | | C1 | FK `app_user.id`; `check (approver_id is distinct from author_id)` |
 | `deleted_at` | `timestamptz` | Y | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.content_version` (C1)
 
@@ -588,6 +654,8 @@ In C0 tables these two columns are C0.
 | `figures` | `jsonb` | N | `'[]'` | C1 | each `{ value, unit, source_id, source_url, reference_date }` |
 | `created_by` | `uuid` | N | | C1 | FK `app_user.id` |
 | `ai_provenance_id` | `uuid` | Y | | C1 | FK `ai_provenance.id` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.content_cause` (C1)
 
@@ -595,6 +663,8 @@ In C0 tables these two columns are C0.
 | --- | --- | --- | --- | --- | --- |
 | `content_id` | `uuid` | N | | C1 | PK part, FK `content_item.id` on delete cascade |
 | `cause_slug` | `text` | N | | C1 | PK part, FK `cause.slug` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.media_asset` (C1)
 
@@ -611,6 +681,8 @@ In C0 tables these two columns are C0.
 | `alt_text` | `text` | N | `''` | C1 | |
 | `exif_stripped` | `boolean` | N | | C1 | `check (exif_stripped)` |
 | `deleted_at` | `timestamptz` | Y | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.content_media` (C1)
 
@@ -619,6 +691,8 @@ In C0 tables these two columns are C0.
 | `content_id` | `uuid` | N | | C1 | PK part, FK `content_item.id` on delete cascade |
 | `media_id` | `uuid` | N | | C1 | PK part, FK `media_asset.id` |
 | `position` | `smallint` | N | `0` | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.agenda_event` (C1)
 
@@ -634,6 +708,8 @@ In C0 tables these two columns are C0.
 | `visibility` | `text` | N | `'internal'` | C1 | `check in ('public','internal')` |
 | `status` | `text` | N | `'planned'` | C1 | `check in ('planned','done','cancelled')` |
 | `deleted_at` | `timestamptz` | Y | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.municipality` (C0)
 
@@ -645,10 +721,12 @@ In C0 tables these two columns are C0.
 | `health_region` | `text` | Y | | C0 | |
 | `population` | `int` | Y | | C0 | |
 | `population_ref_date` | `date` | Y | | C0 | `check ((population is null) = (population_ref_date is null))` |
+| `created_at` | `timestamptz` | N | `now()` | C0 | |
+| `updated_at` | `timestamptz` | N | `now()` | C0 | set by trigger |
 
 ### Data sources, AI and operations
 
-`core.data_source` (C0)
+`core.data_source` (C1: the table holds the C1 `cursor`; every other column is C0 and published through no projection)
 
 | Column | Type | Null | Default | Class | Key / notes |
 | --- | --- | --- | --- | --- | --- |
@@ -658,6 +736,8 @@ In C0 tables these two columns are C0.
 | `cadence` | `text` | N | | C0 | cron, instance timezone |
 | `last_success_at` | `timestamptz` | Y | | C0 | |
 | `cursor` | `jsonb` | Y | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.data_source_run` (C1)
 
@@ -670,6 +750,8 @@ In C0 tables these two columns are C0.
 | `status` | `text` | N | `'running'` | C1 | `check in ('running','ok','failed','rejected')` |
 | `stats` | `jsonb` | N | `'{}'` | C1 | |
 | `error` | `text` | Y | | C1 | no record contents |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.ai_provenance` (C1)
 
@@ -687,6 +769,8 @@ In C0 tables these two columns are C0.
 | `tokens_out` | `int` | N | `0` | C1 | |
 | `job_id` | `uuid` | Y | | C1 | FK `job.id` |
 | `reviewed_by` | `uuid` | Y | | C1 | FK `app_user.id` |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.job` (C1)
 
@@ -703,8 +787,10 @@ In C0 tables these two columns are C0.
 | `run_after` | `timestamptz` | N | `now()` | C1 | index with `state`, `queue` |
 | `locked_by` | `text` | Y | | C1 | worker instance id |
 | `locked_at` | `timestamptz` | Y | | C1 | |
-| `locked_pid` | `int` | Y | | C1 | set only by `core.claim_job()` |
+| `lease_hash` | `bytea` | Y | | C1 | SHA-256 of the lease token; set only by `core.claim_job()` |
 | `last_error` | `text` | Y | | C1 | no payload contents |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.module_registry` (C1)
 
@@ -715,8 +801,10 @@ In C0 tables these two columns are C0.
 | `version` | `text` | N | | C1 | |
 | `enabled` | `boolean` | N | `true` | C1 | |
 | `installed_at` | `timestamptz` | N | `now()` | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
-`core.migration_log` (C1, append-only)
+`audit.migration_log` (C1, append-only, owned by `audit_owner`)
 
 | Column | Type | Null | Default | Class | Key / notes |
 | --- | --- | --- | --- | --- | --- |
@@ -735,6 +823,8 @@ In C0 tables these two columns are C0.
 | `enc_wrapped_key` | `bytea` | N | | C3 | wrapped by the KEK (§4.6) |
 | `state` | `text` | N | `'active'` | C1 | `check in ('active','decrypt_only','retired')`; partial unique on `purpose` where `state = 'active'` |
 | `retired_at` | `timestamptz` | Y | | C1 | |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.publish_generation` (C1)
 
@@ -745,6 +835,8 @@ In C0 tables these two columns are C0.
 | `manifest_sha256` | `text` | N | | C1 | |
 | `min_generation` | `bigint` | N | | C1 | |
 | `triggered_by` | `text` | N | | C1 | audit actor |
+| `created_at` | `timestamptz` | N | `now()` | C1 | |
+| `updated_at` | `timestamptz` | N | `now()` | C1 | set by trigger |
 
 `core.idempotency` (C1, rows deleted after 24 h)
 
