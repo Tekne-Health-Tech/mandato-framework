@@ -8,7 +8,8 @@ PSQL="psql -X -q -v ON_ERROR_STOP=1 -At"
 CHIEF=00000000-0000-7000-8000-000000000001; COMM=00000000-0000-7000-8000-000000000002
 PARL=00000000-0000-7000-8000-000000000003; REMOVED=00000000-0000-7000-8000-000000000005; NEWU=00000000-0000-7000-8000-000000000006
 pass=0; fail=0
-claims() { printf '{"sub":"%s","aal":"%s"}' "$1" "$2"; }
+# Contract 0.1.1: aal2 counts only with a TOTP entry in amr, so the helper adds a fresh one (design 0002 §3).
+claims() { printf '{"sub":"%s","aal":"%s","amr":[{"method":"totp","timestamp":%s}]}' "$1" "$2" "$(date +%s)"; }
 # as ROLE CLAIMS SQL -> runs SQL in one transaction as login ROLE with JWT claims
 as() { local role=$1 cl=$2; shift 2
   $PSQL -U "$role" -d "$DB" -c "begin; select set_config('request.jwt.claims', '$cl', true); $*; commit;" 2>&1; }
@@ -189,6 +190,74 @@ equals "the backslash command did not run" no bash -c "[ -e $MARK ] && echo yes 
 rm -f "$TMPT/modules/hello/db/migrations/0002_bad.sql" "$TMPT/modules/hello/db/migrations/0001_hello.sql"
 fails "an applied migration whose file was deleted aborts" bash -c "$MANDATO migrate $TMPT $DB 2>&1"
 rm -rf "$TMPT"
+
+echo "# staff authentication (design 0002, 0003_core.sql)"
+NOW=$(date +%s); OLD=$((NOW - 3600))
+totp_at() { printf '{"sub":"%s","aal":"aal2","amr":[{"method":"totp","timestamp":%s},{"method":"password","timestamp":%s}]}' "$1" "$2" "$OLD"; }
+old_claims() { printf '{"sub":"%s","aal":"aal2"}' "$1"; }
+sms_claims() { printf '{"sub":"%s","aal":"aal2","amr":[{"method":"sms","timestamp":%s}]}' "$1" "$NOW"; }
+equals "aal2 without a totp amr entry is not aal2 (contract 0.1.1)" f as api_rt "$(old_claims $CHIEF)" "select core.is_aal2()"
+equals "aal2 from an SMS factor holds no role" f as api_rt "$(sms_claims $CHIEF)" "select core.has_role('chefe_gabinete')"
+equals "aal2 with totp holds the role" t as api_rt "$(totp_at $CHIEF $NOW)" "select core.has_role('chefe_gabinete')"
+equals "recent_totp: fresh" t as api_rt "$(totp_at $CHIEF $NOW)" "select core.recent_totp('15 minutes')"
+equals "recent_totp: 20 minutes old" f as api_rt "$(totp_at $CHIEF $((NOW - 1200)))" "select core.recent_totp('15 minutes')"
+equals "recent_totp: from the future" f as api_rt "$(totp_at $CHIEF $((NOW + 600)))" "select core.recent_totp('15 minutes')"
+fails "grant_role with a stale TOTP" as api_rt "$(totp_at $CHIEF $((NOW - 1200)))" "select core.grant_role('$NEWU','comunicacao')"
+
+BI=decode\(\'b1b1\',\'hex\'\); BI2=decode\(\'b2b2\',\'hex\'\); X=decode\(\'01\',\'hex\'\)
+fails "a non-chief cannot invite" as api_rt "$(totp_at $COMM $NOW)" "select core.create_invitation($X,$X,$BI)"
+fails "a chief with a stale TOTP cannot invite" as api_rt "$(totp_at $CHIEF $((NOW - 1200)))" "select core.create_invitation($X,$X,$BI)"
+fails "an existing member of staff cannot be invited" as api_rt "$(totp_at $CHIEF $NOW)" "select core.create_invitation($X,$X,decode('11','hex'))"
+ok "the chief invites" as api_rt "$(totp_at $CHIEF $NOW)" "select core.create_invitation($X,$X,$BI)"
+equals "the sign-up hook sees the open invitation" t as api_rt '{}' "select core.invitation_open($BI)"
+equals "the sign-up hook refuses an e-mail without invitation" f as api_rt '{}' "select core.invitation_open($BI2)"
+equals "anonymous reads no invitation row" 0 as api_rt '{}' "select count(*) from core.staff_invitation"
+equals "a non-chief reads no invitation row" 0 as api_rt "$(totp_at $COMM $NOW)" "select count(*) from core.staff_invitation"
+INV=00000000-0000-7000-8000-0000000000e1
+fails "activation with aal1 is refused (SQL, not only the handler)" as api_rt "{\"sub\":\"$INV\",\"aal\":\"aal1\"}" "select core.activate_invitation($BI,$X,$X)"
+fails "activation with aal2 but no TOTP is refused" as api_rt "$(old_claims $INV)" "select core.activate_invitation($BI,$X,$X)"
+fails "activation without an invitation is refused" as api_rt "$(totp_at $INV $NOW)" "select core.activate_invitation($BI2,$X,$X)"
+ok "the invitee activates" as api_rt "$(totp_at $INV $NOW)" "select core.activate_invitation($BI,$X,$X)"
+fails "a second activation is refused" as api_rt "$(totp_at $INV $NOW)" "select core.activate_invitation($BI,$X,$X)"
+equals "the invitation is used and the hook now refuses it" f as api_rt '{}' "select core.invitation_open($BI)"
+equals "an invited user gets no role by activating" f as api_rt "$(totp_at $INV $NOW)" "select core.is_staff()"
+fails "bootstrap is refused while a chief exists" as migrator '{}' "select audit.bind_migration('core','bootstrap-chief-test'); select core.create_bootstrap_invitation($X,$X,$BI2)"
+fails "api_rt cannot create a bootstrap invitation" as api_rt "$(totp_at $CHIEF $NOW)" "select core.create_bootstrap_invitation($X,$X,$BI2)"
+
+fails "a non-chief cannot change status" as api_rt "$(totp_at $COMM $NOW)" "select core.set_user_status('$INV','suspended')"
+fails "the chief cannot change their own status" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$CHIEF','suspended')"
+fails "status change with a stale TOTP" as api_rt "$(totp_at $CHIEF $((NOW - 1200)))" "select core.set_user_status('$INV','suspended')"
+ok "the chief suspends a user" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$COMM','suspended')"
+equals "a suspended user holds no role, whatever the JWT says" f as api_rt "$(totp_at $COMM $NOW)" "select core.has_role('comunicacao')"
+ok "the chief reactivates" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$COMM','active')"
+ok "the chief removes a user" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$INV','removed')"
+fails "removed is final" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$INV','active')"
+equals "status changes are audited with states, not values" 1 sup "select count(*) from audit.event where action='set_status' and entity_id='$INV' and details->>'to_state'='removed'"
+
+sup "set session_replication_role = replica; insert into core.data_key (key_id, purpose, data_class, version, enc_wrapped_key) values ('00000000-0000-7000-8000-0000000000b4','bi:email:v1','C2',1,'\\xbb')" >/dev/null
+equals "index_key returns the wrapped e-mail index key to anyone in the API" 1 as api_rt '{}' "select count(*) from core.index_key('bi:email:v1')"
+equals "index_key returns nothing for any other purpose" 0 as api_rt '{}' "select count(*) from core.index_key('pii')"
+equals "no audit row carries a blind index value" 0 sup "select count(*) from audit.event where details::text ~* 'b1b1|b2b2' or coalesce(entity_id,'') ~* 'b1b1|b2b2'"
+
+echo "# first chief (bootstrap invitation) on a fresh instance"
+BOOT=${DB}_boot
+psql -X -q -U postgres -d postgres -c "drop database if exists $BOOT" -c "create database $BOOT" >/dev/null
+$PSQL -U postgres -d "$BOOT" -f supabase-shim.sql >/dev/null && $PSQL -U postgres -d "$BOOT" -f ../migrations/0001_core.sql >/dev/null 2>&1
+$MANDATO bootstrap "$ROOT/tenants/demo" "$BOOT" >/dev/null 2>&1
+bas() { local role=$1 cl=$2; shift 2; $PSQL -U "$role" -d "$BOOT" -c "begin; select set_config('request.jwt.claims', '$cl', true); $*; commit;" 2>&1; }
+bsup() { $PSQL -U postgres -d "$BOOT" -c "$*" 2>&1; }
+LEASE="select audit.bind_migration('core','bootstrap-chief')"
+ok "the operator creates the bootstrap invitation" bas migrator '{}' "$LEASE; select core.create_bootstrap_invitation($X,$X,$BI)"
+fails "a second open bootstrap invitation is refused" bas migrator '{}' "$LEASE; select core.create_bootstrap_invitation($X,$X,$BI2)"
+bsup "set session_replication_role = replica; update core.staff_invitation set expires_at = now() - interval '1 day' where bootstrap" >/dev/null
+ok "an expired bootstrap invitation does not block a new one" bas migrator '{}' "$LEASE; select core.create_bootstrap_invitation($X,$X,$BI2)"
+B1=00000000-0000-7000-8000-0000000000d1; B2=00000000-0000-7000-8000-0000000000d2
+# two sessions race to activate the same bootstrap invitation: exactly one chief
+( bas api_rt "$(totp_at $B1 $NOW)" "select core.activate_invitation($BI2,$X,$X)" >/dev/null & bas api_rt "$(totp_at $B2 $NOW)" "select core.activate_invitation($BI2,$X,$X)" >/dev/null & wait )
+equals "concurrent bootstrap activations make exactly one chief" 1 bsup "select count(*) from core.role_assignment where role_id='chefe_gabinete' and revoked_at is null"
+equals "the bootstrap chief is audited as bootstrap_chief" 1 bsup "select count(*) from audit.event where action='bootstrap_chief'"
+fails "bootstrap is refused once the chief exists" bas migrator '{}' "$LEASE; select core.create_bootstrap_invitation($X,$X,decode('b3b3','hex'))"
+psql -X -q -U postgres -d postgres -c "drop database if exists $BOOT" >/dev/null
 
 echo "# upgrade of an instance built before 0002 (forward migration, never an edit of 0001)"
 UPG=${DB}_upgrade

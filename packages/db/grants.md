@@ -4,14 +4,17 @@
 | --- | --- | --- |
 | api_rt | audit.event | SELECT |
 | api_rt | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
+| api_rt | core.activate_invitation(p_bi bytea, p_name bytea, p_email bytea) | EXECUTE |
 | api_rt | core.agenda_event | INSERT, SELECT, UPDATE |
 | api_rt | core.ai_provenance | SELECT |
 | api_rt | core.app_user | SELECT |
+| api_rt | core.cancel_invitation(p_id uuid) | EXECUTE |
 | api_rt | core.cause | SELECT |
 | api_rt | core.content_cause | INSERT, SELECT, UPDATE |
 | api_rt | core.content_item | INSERT, SELECT, UPDATE |
 | api_rt | core.content_media | INSERT, SELECT, UPDATE |
 | api_rt | core.content_version | INSERT, SELECT, UPDATE |
+| api_rt | core.create_invitation(p_name bytea, p_email bytea, p_bi bytea) | EXECUTE |
 | api_rt | core.data_key | SELECT |
 | api_rt | core.data_source (cadence) | SELECT |
 | api_rt | core.data_source (created_at) | SELECT |
@@ -24,7 +27,9 @@
 | api_rt | core.has_permission(p_permission text) | EXECUTE |
 | api_rt | core.has_role(p_role text) | EXECUTE |
 | api_rt | core.idempotency | DELETE, INSERT, SELECT, UPDATE |
+| api_rt | core.index_key(p_purpose text) | EXECUTE |
 | api_rt | core.instance | SELECT |
+| api_rt | core.invitation_open(p_bi bytea) | EXECUTE |
 | api_rt | core.is_aal2() | EXECUTE |
 | api_rt | core.is_staff() | EXECUTE |
 | api_rt | core.job | INSERT |
@@ -33,16 +38,20 @@
 | api_rt | core.municipality | SELECT |
 | api_rt | core.permission | SELECT |
 | api_rt | core.rate_counter | DELETE, INSERT, SELECT, UPDATE |
+| api_rt | core.recent_totp(p_max interval) | EXECUTE |
 | api_rt | core.revoke_role(p_assignment uuid) | EXECUTE |
 | api_rt | core.role | SELECT |
 | api_rt | core.role_assignment | SELECT |
 | api_rt | core.role_permission | SELECT |
+| api_rt | core.set_user_status(p_target uuid, p_status text) | EXECUTE |
+| api_rt | core.staff_invitation | SELECT |
 | api_rt | core.uuid7() | EXECUTE |
 | migrator | audit.bind_migration(p_module_id text, p_migration_id text) | EXECUTE |
 | migrator | audit.migration_log | SELECT |
 | migrator | audit.record_migration(p_module_id text, p_migration_id text, p_sha256 text) | EXECUTE |
 | migrator | audit.register_term(p_kind text, p_term text, p_module_id text) | EXECUTE |
 | migrator | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
+| migrator | core.create_bootstrap_invitation(p_name bytea, p_email bytea, p_bi bytea) | EXECUTE |
 | migrator | core.uuid7() | EXECUTE |
 | worker_c1 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c1 | audit.pool_classes(p_role name) | EXECUTE |
