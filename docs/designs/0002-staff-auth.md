@@ -105,7 +105,7 @@ Handlers are framework-agnostic, on the Fetch API (`(Request) => Promise<Respons
 
 ## 8. Keys and project settings
 
-- **`packages/core-crypto`**:
+- **`packages/crypto` (`src/envelope.js`)**:
   - Envelope and AAD exactly as 0001 §4.6, with XChaCha20-Poly1305 (`libsodium-wrappers`, pinned).
   - The KEK reaches the process as `MANDATO_KEK_<kek_id>` (base64, 32 bytes) from the secret store. It is never logged and never sent to the database.
   - `mandato keys init` (operator) creates the DEKs for the four `pii_` columns and the `bi:email:v1` index key, all wrapped. It then prints the steps for the age-encrypted recovery copy.
@@ -158,7 +158,7 @@ Each test is written to fail first.
 | B1 index key unreadable | §6 `core.index_key`, wrapped bytes of one purpose only |
 | B2 activation lacks aal2 inside | §4 step 4, checks inside the definer; test 2 calls SQL directly |
 | B3 `set_user_status` lacks chief check | §4 step 6 |
-| B4 bootstrap race | §6 instance lock, unique open bootstrap invitation; test 2 concurrency |
+| B4 bootstrap race | §6 bootstrap lock, unique open bootstrap invitation; test 2 concurrency |
 | B5 aal2 ≠ TOTP | §3 `is_aal2` narrowed to TOTP; `auth check` requires phone MFA off |
 | B6 `bi_email` class | C1, as frozen |
 | S1 MFA reset | §4 step 7 order |
