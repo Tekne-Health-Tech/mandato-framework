@@ -23,4 +23,4 @@ jobs:
           path-to-signatures: signatures/cla.json
           path-to-document: https://github.com/Tekne-Health-Tech/mandato-framework/blob/main/CLA.md
           branch: cla-signatures
-          allowlist: drvininunes,dependabot[bot],github-actions[bot],claude[bot]
+          allowlist: Drvininunes,drvininunes,claude,claude[bot],dependabot[bot],github-actions[bot]
