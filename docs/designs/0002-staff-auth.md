@@ -1,6 +1,6 @@
 # Design 0002 — Staff authentication, profiles and audit trail (E0.5)
 
-Status: **Draft v2** · 2026-11-22 · Builds on design 0001 (contract 0.1.0, frozen). Owner: architecture backbone. v2 answers the Codex review `egm/0002/stage1-codex.md`; §10 maps each finding.
+Status: **Draft v3** · 2026-11-22 · Builds on design 0001 (contract 0.1.0, frozen). Owner: architecture backbone. v2 answers the Codex review `egm/0002/stage1-codex.md`; §10 maps each finding.
 
 ## 1. Problem
 
@@ -28,14 +28,14 @@ Design 0001 froze the database side of staff access: `core.has_role` (aal2, acti
 
 | Step | Who | How |
 | --- | --- | --- |
-| 0. First chief | operator, once per instance | `mandato staff bootstrap-chief <tenantDir> <db> --name --email` creates a `bootstrap` invitation for `chefe_gabinete`. It takes the instance lock (§6) and refuses if an active chief or an open bootstrap invitation exists. |
+| 0. First chief | operator, once per instance | `mandato staff bootstrap-chief <tenantDir> <db> --name --email` creates a `bootstrap` invitation for `chefe_gabinete`. It takes the instance lock (§6), first cancels any expired, unused bootstrap invitation, then refuses if an active chief or a still-valid bootstrap invitation exists. |
 | 1. Invitation | chief, recent TOTP | `POST /api/v1/staff/invitations {name, email}`. The API encrypts name and email and computes `bi_email`. `core.create_invitation` (definer) re-checks chief and recent TOTP, cancels an expired open invitation for the same `bi_email`, and inserts the new one (7 days). The chief tells the person out of band; the framework sends no e-mail. `DELETE /api/v1/staff/invitations/{id}` cancels one. |
 | 2. Sign-up | invitee | Supabase sign-up (e-mail + password, confirmation on). The **Before User Created** HTTP hook (§5) accepts only an e-mail with an open invitation. Every other sign-up is refused. |
 | 3. Second factor | invitee | TOTP enrolment, then a verified TOTP login (`aal2` with `totp` in `amr`). |
 | 4. Activation | invitee | `POST /api/v1/me/activate` with an **empty body**; any field is rejected. The API computes `bi_email` from the JWT's verified `email` claim and encrypts name (from the invitation) and e-mail. `core.activate_invitation(bi_email, pii_name, pii_email)` (definer) checks, under the instance lock: `auth.uid()` set, `core.is_aal2()`, no `app_user` with that id, an open unexpired invitation with that `bi_email`. It then creates `app_user` (`id = auth.uid()`) and marks the invitation used. For a bootstrap invitation it re-checks that no active chief exists and inserts the `chefe_gabinete` assignment with `granted_by = auth.uid()`. This is the only self-grant, and it is audited as `bootstrap_chief`. |
 | 5. Roles | chief, recent TOTP | Frozen `grant_role` / `revoke_role`, tightened in 0003 to also require `core.recent_totp('15 min')`. |
 | 6. Suspend, reactivate, remove | chief, recent TOTP | `core.set_user_status(target, status)` (definer). It requires `has_role('chefe_gabinete')`, recent TOTP and `target <> auth.uid()`. Allowed transitions: `active ↔ suspended`, `active/suspended → removed`. `removed` is final. A suspended user fails `has_role` at once, whatever their JWT says, so suspended users cannot act on each other. |
-| 7. Lost TOTP | operator runbook | Done in this order: (1) the chief suspends the user; (2) the operator, with `service_role`, revokes all sessions and deletes the factor; (3) the user re-enrols; (4) the chief reactivates. A stolen `aal2` token is useless from step 1, because `has_role` reads the live status. |
+| 7. Lost TOTP | operator runbook | Another member of staff: (1) the chief suspends the user; (2) the operator, with `service_role`, revokes all sessions and deletes the factor; (3) the user re-enrols; (4) the chief reactivates. A stolen `aal2` token is useless from step 1, because `has_role` reads the live status. **The chief themself** (or the only chief): the operator does step 2 at once. Exposure is bounded by the remaining life of an access token (≤ 15 min), because refresh tokens are revoked. Recommended practice, not enforced: two people hold `chefe_gabinete` (for example the parliamentarian and the chief of staff), so either can suspend the other. |
 
 ## 5. Sign-up hook
 
@@ -45,7 +45,7 @@ Design 0001 froze the database side of staff access: `core.has_role` (aal2, acti
 - It answers within Supabase's 5-second budget. Statement timeout is 2 s; on timeout or error it refuses (fail closed).
 - The answer is JSON in Supabase's documented form: `{}` with 200 to allow, or `{"error": {"http_code": 403, "message": "Cadastro apenas por convite."}}` to refuse.
 - It runs as `api_rt` with the anonymous claim and calls only `core.invitation_open(bi_email) → boolean` (definer).
-- **Replay** within the window is harmless: the call is read-only and returns a boolean, so a replay only costs a lookup. No `webhook-id` store is kept.
+- **Replay** within the window cannot change state (the call is read-only), but it could be used to flood the endpoint. Each API process therefore keeps the `webhook-id`s it has seen in the last 5 minutes (bounded in-memory set) and answers a repeat at once without touching the database, and allows at most 4 hook requests in flight; excess requests are refused at once (fail closed: a refused sign-up can be retried by the invitee).
 
 ## 6. Database changes (`0003_core.sql`, forward only, contract 0.1.1)
 
@@ -64,7 +64,7 @@ Design 0001 froze the database side of staff access: `core.has_role` (aal2, acti
 
 - Constraints and policies on `core.staff_invitation`:
   - Unique `bi_email` where `used_at is null and cancelled_at is null`.
-  - Unique `(bootstrap)` where `bootstrap and used_at is null and cancelled_at is null`.
+  - Unique `(bootstrap)` where `bootstrap and used_at is null and cancelled_at is null`. An expired row stays in that index until cancelled, so `bootstrap-chief` and `create_invitation` cancel expired open rows under the lock before inserting.
   - RLS is forced. `api_rt` may select only with `has_role('chefe_gabinete')`; there is no direct insert or update grant.
   - Audited by the row trigger.
 - **Instance lock.** Bootstrap creation and activation both run `select … from core.instance where id = 1 for update`, then re-check under that lock. This serializes the "no chief yet" decision.
@@ -132,7 +132,8 @@ Each test is written to fail first.
 3. **`set_user_status`:**
    - refuses: a non-chief, self, stale TOTP, `removed → active`;
    - a suspended chief cannot act.
-4. **Tightened frozen functions:** `grant_role` with stale TOTP fails; `has_role` with `aal2` but SMS in `amr` returns false; every existing 0001 test still passes.
+4. **Tightened frozen functions:** `grant_role` with stale TOTP fails; `has_role` with `aal2` but SMS in `amr` returns false; every existing 0001 test still passes after the `run.sh` claims helper adds a fresh `totp` `amr` entry (the tightening is intentional, so the helper changes, not the assertions); one new test keeps the old `{sub, aal}` claims and expects denial.
+4b. **Replay and bootstrap expiry:** a repeated `webhook-id` never reaches the database; a fifth concurrent hook request is refused; an expired bootstrap invitation does not block a new one.
 5. **API:**
    - every staff endpoint refuses `aal1`, a suspended user and a non-chief;
    - recent-auth endpoints refuse stale or future `amr`;
