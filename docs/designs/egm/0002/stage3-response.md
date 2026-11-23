@@ -12,3 +12,9 @@ Fixed in `a53c38a`. Each fix comes with a test that failed on the reviewed commi
 Suites after the fixes: `pnpm test` 94/94, `packages/db/test/run.sh` 157/157, `tsc` clean, grant matrix unchanged.
 
 Note on the reviewer's run: the sandbox had no `node_modules`, so Codex could not execute the suites; CI runs them on every push.
+
+## Re-check (`stage4-codex-recheck.md`): 3 closed, 1 open, 0 new
+
+Finding 2 stayed open: the budget freed the slot, but `request.text()` kept the abandoned body pending. Fixed in the next commit: `hook.js` reads the body through its own reader, at most 64 KiB, and cancels the reader when the budget expires or the limit is passed. Tests that failed before: "a body that never finishes is cancelled" (4 cancellations expected, 0 before) and "a streamed body over 64 KiB without content-length is cut off" (before the fix it read without bound until the process ran out of memory). Suites: `pnpm test` 95/95, `run.sh` 157/157.
+
+Per the stopping rule (wave 1 method: each re-check narrower, stop after about three rounds), one last check covers only this item.

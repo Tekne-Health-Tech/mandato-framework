@@ -306,15 +306,31 @@ test('JWT cold start: concurrent verifications share the first JWKS fetch (findi
   assert.equal(calls, 1);
 });
 
-test('hook: the budget covers the whole request, so bodies that never finish cannot hold the slots (finding 2)', async () => {
+test('hook: the budget covers the whole request, and a body that never finishes is cancelled (finding 2, re-check)', async () => {
   const db = fakeDb();
   const h = createSignupHook({ pool: db.pool, secret: SECRET, env: db.env, budgetMs: 150 });
+  let cancelled = 0;
   const stuck = () => new Request('http://api.test/api/v1/auth/hooks/before-user-created', { method: 'POST', duplex: 'half',
-    body: new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode('{"user":')); } }),
+    body: new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode('{"user":')); }, cancel() { cancelled++; } }),
     headers: { 'webhook-id': `msg_${randomBytes(4).toString('hex')}`, 'webhook-timestamp': String(nowS()), 'webhook-signature': 'v1,x' } });
   const four = await Promise.all([1, 2, 3, 4].map(() => h(stuck())));
   for (const r of four) assert.equal(r.status, 403);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(cancelled, 4, 'every abandoned body read is cancelled, not left pending');
   assert.equal((await h(hookReq())).status, 200, 'the slots are free again');
+});
+
+test('hook: a streamed body over 64 KiB without content-length is cut off and refused', async () => {
+  const db = fakeDb();
+  const h = createSignupHook({ pool: db.pool, secret: SECRET, env: db.env, budgetMs: 2000 });
+  let pulled = 0; let cancelled = 0;
+  const big = new Request('http://api.test/api/v1/auth/hooks/before-user-created', { method: 'POST', duplex: 'half',
+    body: new ReadableStream({ pull(ctl) { pulled++; ctl.enqueue(new Uint8Array(16 * 1024)); }, cancel() { cancelled++; } }),
+    headers: { 'webhook-id': 'msg_grande', 'webhook-timestamp': String(nowS()), 'webhook-signature': 'v1,x' } });
+  assert.equal((await h(big)).status, 403);
+  assert.ok(pulled <= 6, `stopped reading after the limit (pulled ${pulled})`);
+  assert.equal(cancelled, 1);
+  assert.equal(db.connects, 0);
 });
 
 test('hook: concurrent deliveries of one webhook-id reach the database once (finding 4)', async () => {

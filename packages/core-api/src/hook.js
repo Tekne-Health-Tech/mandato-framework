@@ -31,11 +31,31 @@ export function createSignupHook({ pool, secret, env = process.env, now = () => 
     }, { statementTimeout: 2000 });
   }
 
+  // Reads at most MAX_BODY bytes. The reader is cancelled when the budget expires or the limit is passed, so an
+  // abandoned or oversized body is never left pending (stage 4 re-check, finding 2).
+  async function readBody(request, signal) {
+    if (!request.body) return '';
+    const reader = request.body.getReader();
+    const cancel = () => { reader.cancel().catch(() => {}); };
+    signal.addEventListener('abort', cancel, { once: true });
+    const chunks = []; let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > MAX_BODY) { cancel(); return null; }
+        chunks.push(value);
+      }
+    } finally { signal.removeEventListener('abort', cancel); }
+    return Buffer.concat(chunks).toString('utf8');
+  }
+
   // Body, signature and lookup, all inside one budget (stage 3 review, finding 2).
-  async function work(request) {
+  async function work(request, signal) {
     const id = request.headers.get('webhook-id');
-    const raw = await request.text();
-    if (raw.length > MAX_BODY) return false;
+    const raw = await readBody(request, signal);
+    if (raw === null) return false;
     let payload;
     try {
       payload = wh.verify(raw, {
@@ -62,11 +82,12 @@ export function createSignupHook({ pool, secret, env = process.env, now = () => 
     if (Number(request.headers.get('content-length') ?? 0) > MAX_BODY) return REFUSE();
     if (inFlight >= maxInFlight) { log('hook: refused, too many in flight'); return REFUSE(); }
     inFlight++;
+    const ctl = new AbortController();
     let timer;
-    const budget = new Promise((res) => { timer = setTimeout(() => { log('hook: refused, budget exceeded'); res(false); }, budgetMs); });
+    const budget = new Promise((res) => { timer = setTimeout(() => { log('hook: refused, budget exceeded'); ctl.abort(); res(false); }, budgetMs); });
     try {
-      const allowed = await Promise.race([budget, work(request).catch(() => false)]);
+      const allowed = await Promise.race([budget, work(request, ctl.signal).catch(() => false)]);
       return allowed === true ? ALLOW() : REFUSE();
-    } finally { clearTimeout(timer); inFlight--; }
+    } finally { clearTimeout(timer); ctl.abort(); inFlight--; }
   };
 }
