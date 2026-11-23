@@ -16,6 +16,9 @@
     "yaml": "2.9.1"
   },
   "dependencies": {
-    "libsodium-wrappers": "0.7.15"
+    "jose": "6.2.15",
+    "libsodium-wrappers": "0.7.15",
+    "pg": "8.22.0",
+    "standardwebhooks": "1.1.1"
   }
 }
