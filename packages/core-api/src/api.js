@@ -69,7 +69,7 @@ export function createApi({ pool, verify, hookSecret, env = process.env, nowSec 
       const claims = await claimsOf(req);
       return run(claims, async (tx) => {
         const { rows } = await tx.query('select id, status, pii_name from core.app_user where id = $1', [claims.sub]);
-        if (!rows.length) throw new Problem(404, 'not_activated', 'Conta ainda não ativada.');
+        if (!rows.length) throw new Problem(404, 'not_active', 'Conta não ativada ou inativa.');
         const keys = await staffKeyring(tx, env);
         const u = rows[0];
         const roles = (await rolesOf(tx, [u.id])).get(u.id);

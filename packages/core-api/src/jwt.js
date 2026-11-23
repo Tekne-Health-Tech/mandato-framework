@@ -33,6 +33,7 @@ export function createVerifier({ issuer, jwksUri, fetchFn = fetch, now = () => D
 
   async function keyFor(header) {
     if (!ALGS.includes(header.alg) || typeof header.kid !== 'string') throw new AuthError('alg');
+    if (inflight) await inflight;   // a fetch already running (cold start or refetch) serves every waiting request
     if (now() - fetchedAt > ttlMs && now() - lastAttempt >= 1000) await refresh();
     if (!keys?.has(header.kid) && now() - lastAttempt >= cooldownMs) await refresh();
     if (!keys || now() - fetchedAt > staleMs) throw new AuthError('jwks unavailable');

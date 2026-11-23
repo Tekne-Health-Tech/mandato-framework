@@ -291,3 +291,38 @@ test('auth check calls only the Management API auth config, with the operator to
   await assert.rejects(authCheck({ projectRef: ref, apiUrl: 'https://a.test', token: '', fetchFn }));
   await assert.rejects(authCheck({ projectRef: ref, apiUrl: 'https://a.test', token: 't', fetchFn: async () => new Response('', { status: 401 }) }));
 });
+
+// ---------------------------------------------------------------- stage 3 code review (egm/0002/stage3-codex-code.md)
+test('JWT cold start: concurrent verifications share the first JWKS fetch (finding 3)', async () => {
+  let calls = 0; let release;
+  const gate = new Promise((r) => { release = r; });
+  const fetchFn = async () => { calls++; await gate; return new Response(JSON.stringify({ keys: [jwk] })); };
+  const v = createVerifier({ issuer: ISS, jwksUri: JWKS, fetchFn });
+  const [t1, t2] = [await token(), await token()];
+  const both = Promise.all([v(t1), v(t2)]);
+  await new Promise((r) => setTimeout(r, 10)); release();
+  const out = await both;
+  assert.deepEqual(out.map((c) => c.sub), [SUB, SUB]);
+  assert.equal(calls, 1);
+});
+
+test('hook: the budget covers the whole request, so bodies that never finish cannot hold the slots (finding 2)', async () => {
+  const db = fakeDb();
+  const h = createSignupHook({ pool: db.pool, secret: SECRET, env: db.env, budgetMs: 150 });
+  const stuck = () => new Request('http://api.test/api/v1/auth/hooks/before-user-created', { method: 'POST', duplex: 'half',
+    body: new ReadableStream({ start(ctl) { ctl.enqueue(new TextEncoder().encode('{"user":')); } }),
+    headers: { 'webhook-id': `msg_${randomBytes(4).toString('hex')}`, 'webhook-timestamp': String(nowS()), 'webhook-signature': 'v1,x' } });
+  const four = await Promise.all([1, 2, 3, 4].map(() => h(stuck())));
+  for (const r of four) assert.equal(r.status, 403);
+  assert.equal((await h(hookReq())).status, 200, 'the slots are free again');
+});
+
+test('hook: concurrent deliveries of one webhook-id reach the database once (finding 4)', async () => {
+  const db = fakeDb({ hang: true });
+  const h = createSignupHook({ pool: db.pool, secret: SECRET, env: db.env });
+  const id = 'msg_simultanea';
+  const all = Promise.all([1, 2, 3].map(() => h(hookReq({ id }))));
+  await new Promise((r) => setTimeout(r, 20)); db.release();
+  for (const r of await all) assert.equal(r.status, 200);
+  assert.equal(db.connects, 1);
+});

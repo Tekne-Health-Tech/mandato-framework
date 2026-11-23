@@ -212,9 +212,13 @@ begin
   return true;
 end $$;
 
--- An activated user with no role yet reads their own row and assignments (GET /me); has_role still decides everything else.
-create policy self_read on core.app_user for select to api_rt using (core.is_aal2() and id = auth.uid());
-create policy self_read on core.role_assignment for select to api_rt using (core.is_aal2() and user_id = auth.uid());
+-- An active user with no role yet reads their own row and assignments (GET /me); has_role still decides everything else.
+-- A suspended or removed user reads nothing, not even their own row (stage 3 review, finding 1).
+create policy self_read on core.app_user for select to api_rt
+  using (core.is_aal2() and id = auth.uid() and status = 'active');
+create policy self_read on core.role_assignment for select to api_rt
+  using (core.is_aal2() and user_id = auth.uid()
+         and exists (select 1 from core.app_user u where u.id = auth.uid() and u.status = 'active'));
 
 -- ---------------------------------------------------------------- frozen role functions, tightened (recent TOTP)
 create or replace function core.grant_role(p_target uuid, p_role text) returns uuid language plpgsql security definer

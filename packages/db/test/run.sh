@@ -234,6 +234,8 @@ fails "a non-chief cannot change status" as api_rt "$(totp_at $COMM $NOW)" "sele
 fails "the chief cannot change their own status" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$CHIEF','suspended')"
 fails "status change with a stale TOTP" as api_rt "$(totp_at $CHIEF $((NOW - 1200)))" "select core.set_user_status('$INV','suspended')"
 ok "the chief suspends a user" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$COMM','suspended')"
+equals "a suspended user reads not even their own row (self_read)" 0 as api_rt "$(totp_at $COMM $NOW)" "select count(*) from core.app_user where id = '$COMM'"
+equals "... nor their own role assignments" 0 as api_rt "$(totp_at $COMM $NOW)" "select count(*) from core.role_assignment where user_id = '$COMM'"
 equals "a suspended user holds no role, whatever the JWT says" f as api_rt "$(totp_at $COMM $NOW)" "select core.has_role('comunicacao')"
 ok "the chief reactivates" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$COMM','active')"
 ok "the chief removes a user" as api_rt "$(totp_at $CHIEF $NOW)" "select core.set_user_status('$INV','removed')"

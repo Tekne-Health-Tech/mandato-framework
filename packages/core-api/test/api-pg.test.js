@@ -139,6 +139,7 @@ test('a suspended chief loses every staff endpoint at once, whatever the token s
   assert.equal(g.status, 201);
   assert.equal((await call('GET', '/staff', { as: inv })).status, 200);
   assert.equal((await call('POST', `/staff/${INV}/status`, { as: chief, body: { status: 'suspended' } })).status, 204);
+  assert.equal((await call('GET', '/me', { as: inv })).status, 404, 'a suspended member does not read their own profile');
   for (const [m, p, body] of [['GET', '/staff'], ['GET', '/audit/events'], ['POST', `/staff/${CHIEF}/status`, { status: 'suspended' }],
     ['POST', '/staff/invitations', { name: 'A B', email: 'a@example.org' }]]) {
     assert.equal((await call(m, p, { as: inv, body })).status, 403, `${m} ${p}`);
