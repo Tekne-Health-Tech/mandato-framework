@@ -31,6 +31,8 @@ jobs:
         run: pnpm mandato validate tenants/demo
       - name: TypeScript contracts compile
         run: npx tsc -p .
+      - name: Mobile shell exports for web
+        run: pnpm --dir apps/mobile export:web
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
