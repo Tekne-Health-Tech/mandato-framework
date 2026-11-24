@@ -86,6 +86,32 @@ class DueTest(unittest.TestCase):
         self.assertEqual(got, [utc(2026, 11, 29, 15, 0)])
         self.assertEqual(due_minutes(s, self.TZ, utc(2026, 11, 30, 14, 0), utc(2026, 11, 30, 15, 30)), [])
 
+    def test_dst_gap_does_not_fire(self):
+        # Sao Paulo, 2018-11-04: local 00:00 jumped to 01:00 (03:00 UTC). 00:30 local did not exist that day.
+        s = parse("30 0 * * *")
+        got = []
+        t = utc(2018, 11, 4, 0, 0)
+        while t < utc(2018, 11, 4, 6, 0):
+            got += due_minutes(s, "America/Sao_Paulo", t, t + timedelta(minutes=60))
+            t += timedelta(minutes=60)
+        self.assertEqual(got, [])
+
+    def test_dst_fold_fires_at_both_instants(self):
+        # Sao Paulo, 2018-02-17/18: local 23:00-23:59 on the 17th happened twice (UTC-2 then UTC-3).
+        s = parse("30 23 * * *")
+        got = []
+        t = utc(2018, 2, 18, 0, 0)
+        while t < utc(2018, 2, 18, 4, 0):
+            got += due_minutes(s, "America/Sao_Paulo", t, t + timedelta(minutes=60))
+            t += timedelta(minutes=60)
+        self.assertEqual(got, [utc(2018, 2, 18, 1, 30), utc(2018, 2, 18, 2, 30)])
+
+    def test_new_york_spring_forward(self):
+        s = parse("30 2 * * *")   # 2026-03-08 02:30 local does not exist
+        self.assertEqual(due_minutes(s, "America/New_York", utc(2026, 3, 8, 6, 0), utc(2026, 3, 8, 7, 0)), [])
+        self.assertEqual(due_minutes(s, "America/New_York", utc(2026, 3, 9, 6, 0), utc(2026, 3, 9, 7, 0)),
+                         [utc(2026, 3, 9, 6, 30)])
+
     def test_bad_timezone_refused(self):
         with self.assertRaises(CronError):
             due_minutes(parse("* * * * *"), "Nowhere/Land", None, utc(2026, 1, 1))
