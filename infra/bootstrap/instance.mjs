@@ -237,8 +237,13 @@ export function up(tenantDir, o) {
   const exists = psql(`select count(*) from pg_database where datname = '${database}'`) === '1';
   step('preflight', () => {
     if (!exists) return;
-    const row = psql(`select case when to_regclass('core.instance') is null then 'none'
-      else coalesce((select slug || '|' || coalesce(env, '') from core.instance limit 1), 'empty') end`, database);
+    // Separate statements: a single query naming core.instance or its env column fails to parse on a database that
+    // has neither yet, before any CASE could guard it.
+    const has = psql(`select (to_regclass('core.instance') is not null)::text || '|' || exists (select 1 from information_schema.columns
+      where table_schema = 'core' and table_name = 'instance' and column_name = 'env')::text`, database);
+    const [hasTable, hasEnv] = has.split('|');
+    const row = hasTable !== 'true' ? 'none'
+      : (psql(`select slug || '|' || ${hasEnv === 'true' ? "coalesce(env, '')" : "''"} from core.instance limit 1`, database) || 'empty');
     preflightIdentity(row, rendered.slug, o.env, database);
   });
 
@@ -260,7 +265,11 @@ export function up(tenantDir, o) {
   if (demo && (!exists || o.resetDemo)) {
     step('demo reset', () => tools(['demo', 'reset', '/srv/tenant', database], kekEnv));
   } else {
-    if (!exists) step('create database', () => { psql(`create database ${database}`); psql(readFileSync(join(ROOT, 'packages/db/test/supabase-shim.sql'), 'utf8'), database); });
+    if (!exists) step('create database', () => psql(`create database ${database}`));
+    // local only: Supabase's auth schema is stood in by the shim, also on an existing empty database being adopted
+    if (psql("select count(*) from pg_namespace where nspname = 'auth'", database) === '0') {
+      step('auth shim', () => psql(readFileSync(join(ROOT, 'packages/db/test/supabase-shim.sql'), 'utf8'), database));
+    }
     step('bootstrap', () => tools(['bootstrap', '/srv/tenant', database]));
     step('migrate', () => tools(['migrate', '/srv/tenant', database]));
   }

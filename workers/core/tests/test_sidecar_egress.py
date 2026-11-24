@@ -64,7 +64,7 @@ class SidecarTest(unittest.TestCase):
         self.assertEqual(self.sc.handle(["x"]), {"error": "bad_request"})
 
     def client_of(self, lease):
-        return self.sc.clients[hashlib.sha256(lease.encode()).hexdigest()][0]
+        return self.sc.clients[hashlib.sha256(lease.encode()).hexdigest()].client
 
     def test_budgets_are_per_job(self):
         self.sc.handle({"lease": "L1", "url": self.url})
@@ -112,6 +112,32 @@ class SidecarTest(unittest.TestCase):
         self.assertEqual(state["max"], 1)
         self.assertEqual(sum(1 for o in out if "status" in o), 5)
         self.assertEqual(sum(1 for o in out if o.get("error") == "run_too_large"), 15)
+
+    def test_a_slot_in_use_is_never_evicted(self):
+        """Idle eviction must not hand a second client (own lock, fresh budget) to a lease whose requests still run."""
+        import time
+        now = [0.0]
+        self.sc.clock = lambda: now[0]
+        gate, inside = threading.Event(), threading.Event()
+        inner = fake_transport(self.seen)
+        def held(*a):
+            if a[2] != "/robots.txt":
+                inside.set(); gate.wait(5)
+            return inner(*a)
+        self.sc.transport = held
+        t = threading.Thread(target=lambda: self.sc.handle({"lease": "L1", "url": self.url}))
+        t.start()
+        self.assertTrue(inside.wait(5))
+        first = self.client_of("L1")
+        now[0] = 10 ** 6   # far past JOB_IDLE_S while the request is still in flight
+        self.leases["L9"] = ("job-9", self.m["source_id"])
+        self.sc.transport = inner
+        self.sc.handle({"lease": "L9", "url": self.url})   # triggers the eviction sweep
+        self.assertIs(self.client_of("L1"), first)
+        gate.set(); t.join(5)
+        now[0] = 2 * 10 ** 6
+        self.sc.handle({"lease": "L9", "url": self.url})
+        self.assertNotIn(hashlib.sha256(b"L1").hexdigest(), self.sc.clients, "an idle, unused slot is evicted")
 
     def test_socket_round_trip_records_under_the_worker(self):
         d = tempfile.mkdtemp()

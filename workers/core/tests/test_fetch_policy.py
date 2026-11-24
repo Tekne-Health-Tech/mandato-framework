@@ -241,5 +241,52 @@ class DeadlineTest(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 3)
 
 
+    def test_name_resolution_counts_against_the_same_budget(self):
+        import time
+        from unittest import mock
+        got = {}
+        def slow_dns(host):
+            time.sleep(0.3)
+            return ["8.8.8.8"]
+        def transport(ip, host, path_qs, headers, timeout, max_body):
+            got.setdefault(path_qs, timeout)
+            return (404, {}, b"") if path_qs == "/robots.txt" else (200, {}, b"ok")
+        with mock.patch.object(P, "TIMEOUT_S", 1.0):
+            c = FetchClient(dict(MANIFEST), lambda *a: hashlib.sha256(a[2]).hexdigest(), resolver=slow_dns, transport=transport,
+                            bucket=P.TokenBucket(600, clock=lambda: 0.0, sleep=lambda s: None))
+            c.get(f"https://{HOST}/a")
+            self.assertLess(got["/a"], 0.75, "the transport gets what DNS left of the budget")
+            def hung_dns(host):
+                time.sleep(5)
+            c.resolver = hung_dns
+            t0 = time.monotonic()
+            with self.assertRaises(P.FetchRefused) as e:
+                c.get(f"https://{HOST}/b")
+            self.assertEqual(e.exception.code, "fetch_failed")
+            self.assertLess(time.monotonic() - t0, 2)
+
+    def test_tunnel_handshake_and_exchange_share_one_deadline(self):
+        import socket, threading, time
+        from workers.core.fetch.sidecar import connect_transport
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        def slow_proxy():
+            c, _ = srv.accept()
+            c.recv(4096)
+            for b in b"HTTP/1.1 200 OK\r\n\r\n":   # each byte well inside the socket timeout
+                try:
+                    c.sendall(bytes([b]))
+                except OSError:
+                    break
+                time.sleep(0.1)
+            c.close()
+        threading.Thread(target=slow_proxy, daemon=True).start()
+        t0 = time.monotonic()
+        with self.assertRaises(P.FetchRefused) as e:
+            connect_transport(srv.getsockname())(None, HOST, "/", {}, 1.0, 1000)
+        srv.close()
+        self.assertEqual(e.exception.code, "fetch_failed")
+        self.assertLess(time.monotonic() - t0, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ import http.client
 import socket
 import ssl
 import threading
+import time
 from contextlib import contextmanager
 from collections.abc import Callable
 from urllib.parse import urljoin
@@ -55,37 +56,60 @@ def deadline(sock: socket.socket, seconds: float):
         raise P.FetchRefused("fetch_failed", "deadline")
 
 
-def http_get(conn: http.client.HTTPConnection, sock, host: str, path_qs: str, headers: dict[str, str], timeout: float,
-             max_body: int):
-    """One GET over an established socket, bounded in time (total) and size."""
+def exchange(conn: http.client.HTTPConnection, sock, host: str, path_qs: str, headers: dict[str, str], max_body: int):
+    """One GET over an established socket, bounded in size. The caller holds the deadline."""
     conn.sock = sock
-    with deadline(sock, timeout):
-        conn.request("GET", path_qs, headers={**headers, "Host": host, "Accept-Encoding": "identity"})
-        r = conn.getresponse()
-        length = r.getheader("Content-Length")
-        if length is not None and length.isdigit() and int(length) > max_body:
-            raise P.FetchRefused("fetch_refused", "body_too_large")
-        body = r.read(max_body + 1)
+    conn.request("GET", path_qs, headers={**headers, "Host": host, "Accept-Encoding": "identity"})
+    r = conn.getresponse()
+    length = r.getheader("Content-Length")
+    if length is not None and length.isdigit() and int(length) > max_body:
+        raise P.FetchRefused("fetch_refused", "body_too_large")
+    body = r.read(max_body + 1)
     if len(body) > max_body:
         raise P.FetchRefused("fetch_refused", "body_too_large")
     return r.status, {k.lower(): v for k, v in r.getheaders()}, body
 
 
+def http_get(conn: http.client.HTTPConnection, sock, host: str, path_qs: str, headers: dict[str, str], timeout: float,
+             max_body: int):
+    """One GET over an established socket, bounded in time (total) and size."""
+    with deadline(sock, timeout):
+        return exchange(conn, sock, host, path_qs, headers, max_body)
+
+
 def tls_transport(ip: str, host: str, path_qs: str, headers: dict[str, str], timeout: float, max_body: int):
-    """Connects to the already validated `ip`; SNI, Host and certificate checks use `host`."""
+    """Connects to the already validated `ip`; SNI, Host and certificate checks use `host`. `timeout` is the whole
+    request's remaining budget: connect, TLS handshake, request and body share one deadline."""
+    end = time.monotonic() + timeout
     ctx = ssl.create_default_context()
-    raw = socket.create_connection((ip, 443), timeout=timeout)
-    try:
-        with deadline(raw, timeout):
-            sock = ctx.wrap_socket(raw, server_hostname=host)
-    except Exception:
-        raw.close()
-        raise
+    raw = socket.create_connection((ip, 443), timeout=max(timeout, 0.001))
     conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
     try:
-        return http_get(conn, sock, host, path_qs, headers, timeout, max_body)
+        with deadline(raw, end - time.monotonic()):
+            sock = ctx.wrap_socket(raw, server_hostname=host)
+            return exchange(conn, sock, host, path_qs, headers, max_body)
     finally:
         conn.close()
+        raw.close()
+
+
+def bounded(fn: Callable, arg, seconds: float):
+    """Runs a call that cannot be interrupted (getaddrinfo) in a daemon thread and gives up after `seconds`."""
+    out: dict = {}
+
+    def go():
+        try:
+            out["v"] = fn(arg)
+        except BaseException as e:   # noqa: BLE001 - re-raised in the caller's thread
+            out["e"] = e
+    t = threading.Thread(target=go, daemon=True)
+    t.start()
+    t.join(max(seconds, 0))
+    if t.is_alive():
+        raise P.FetchRefused("fetch_failed", "deadline")
+    if "e" in out:
+        raise out["e"]
+    return out["v"]
 
 
 class FetchClient:
@@ -108,14 +132,18 @@ class FetchClient:
         self.bucket.take()
         if not self.alive():   # the rate-limit wait can outlast the lease
             raise P.FetchRefused("lease_lost")
+        end = time.monotonic() + P.TIMEOUT_S   # one budget for name resolution and the whole exchange
         ip = None   # resolver None: the transport's gateway resolves and checks (fetch sidecar behind egress, design 0004 §3)
         if self.resolver is not None:
             try:
-                ip = P.check_addresses(self.resolver(target.host))
+                ip = P.check_addresses(bounded(self.resolver, target.host, P.TIMEOUT_S))
             except OSError:
                 raise P.FetchRefused("fetch_failed", "dns") from None
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            raise P.FetchRefused("fetch_failed", "deadline")
         try:
-            status, h, body = self.transport(ip, target.host, target.path_qs, headers, P.TIMEOUT_S, P.MAX_BODY)
+            status, h, body = self.transport(ip, target.host, target.path_qs, headers, remaining, P.MAX_BODY)
         except P.FetchRefused:
             raise
         except (OSError, http.client.HTTPException, ssl.SSLError):

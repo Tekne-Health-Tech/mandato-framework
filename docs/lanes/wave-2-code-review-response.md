@@ -41,3 +41,23 @@ checked where noted).
 
 `packages/db/test/run.sh` 208/208 · JS 108/108 · Python unit OK · network test 43/43 · `instance up --env local`
 on the demo twice (second run: no demo reset, check green) · `check_ai_boundary` and `check_images` OK.
+
+## Re-check (Codex, EGM stage 5) and fixes
+
+The re-check closed 18 of 23 findings and found one new blocker. The text is in `docs/designs/egm/0004/stage5-codex-recheck.md`.
+
+| Item | Fix | Test |
+|---|---|---|
+| E3.1 #8: deadline reset between phases; DNS outside it | One budget per request: `_send` starts it before name resolution. The resolver runs bounded in a daemon thread, because `getaddrinfo` cannot be interrupted. Both transports get only the remaining time and hold a single `deadline()` over connect, tunnel, TLS and exchange | `test_name_resolution_counts_against_the_same_budget` (a slow DNS shrinks the transport's budget; a hung DNS fails within the budget); `test_tunnel_handshake_and_exchange_share_one_deadline` |
+| E0.7 #5: idle eviction of a slot in use | Each slot counts the requests holding or waiting on its lock. Only an unused slot that has been idle past `JOB_IDLE_S` is evicted | `test_a_slot_in_use_is_never_evicted` |
+| E0.7 #6: `hard_exit` can block on logging | No logging call. It makes one non-blocking write to fd 2, then calls `os._exit(70)` | `HardExitTest` (subprocess with a handler lock held forever: exits 70 within 10 s) |
+| E0.7 #8: staging | Still open and owner-dependent. Codex judged the stated consequence coherent | — |
+| E0.7 #14: platform digests not tied to the index | `scripts/check_image_platforms.py` reads each locked index from the registry (`docker buildx imagetools inspect --raw`). The amd64 and arm64 (v8) manifests must equal the lock. It runs in the CI job `images` | Run against the registry: ok. A forged arm64 digest is reported as mismatched |
+| New #1: preflight SQL fails on an empty or pre-0005 database | Separate statements: first whether `core.instance` and its `env` column exist, then the row. Adopting an existing empty local database also gets the auth shim | `instance up --db <empty existing db>`: preflight, shim, bootstrap and migrate pass. Both probe queries were checked on an empty database and on a migrated one |
+
+Also found by the new `supply-chain` job, which worked as intended on its first CI run: the pinned bases predate Debian's
+fixes for CVE-2026-19499 and CVE-2026-5435 (glibc, high) and CVE-2026-85091 (zlib, high). Both images now install
+the exact fixed versions. Each line is removed once the upstream base is rebuilt and re-locked.
+
+Verification: `run.sh` 208/208 · JS 108/108 · Python unit OK · network test 43/43 (images built locally without the
+apt step, which this sandbox cannot reach; CI builds them with it) · `check_images` and `check_image_platforms` OK.

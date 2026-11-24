@@ -62,6 +62,24 @@ class HeartbeatTest(unittest.TestCase):
         self.assertFalse(lost.is_set())
 
 
+class HardExitTest(unittest.TestCase):
+    def test_exits_even_when_logging_is_blocked(self):
+        import os, subprocess, sys, time
+        code = ("import logging, threading, time\n"
+                "from workers.core.runtime.worker import hard_exit\n"
+                "h = logging.StreamHandler(); logging.getLogger().addHandler(h)\n"
+                "h.acquire()\n"   # a handler stuck forever, as on a full pipe
+                "threading.Thread(target=hard_exit).start()\n"
+                "time.sleep(30)\n")
+        root = Path(__file__).resolve().parents[3]
+        t0 = time.monotonic()
+        p = subprocess.run([sys.executable, "-c", code], cwd=root, env={**os.environ, "PYTHONPATH": str(root)},
+                           capture_output=True, timeout=20)
+        self.assertEqual(p.returncode, 70)
+        self.assertLess(time.monotonic() - t0, 10)
+        self.assertIn(b"lease lost", p.stderr)
+
+
 class RuntimeSpecTest(unittest.TestCase):
     def write(self, doc):
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)

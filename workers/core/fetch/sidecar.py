@@ -23,10 +23,11 @@ import ssl
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler
 
 from . import policy as P
-from .client import FetchClient, deadline, http_get
+from .client import FetchClient, deadline, exchange
 
 log = logging.getLogger("mandato.fetch.sidecar")
 SECRET_REF = re.compile(r"^[a-z][a-z0-9_]{1,60}$")
@@ -53,9 +54,10 @@ def read_secret(ref: str, allowed: set[str], root: str = "/run/secrets") -> str:
 def connect_transport(proxy: tuple[str, int], ca_file: str | None = None) -> Callable:
     """A FetchClient transport that tunnels through the egress gateway with HTTP CONNECT, then speaks TLS to `host`."""
     def transport(ip, host, path_qs, headers, timeout, max_body):
-        raw = socket.create_connection(proxy, timeout=timeout)
+        end = time.monotonic() + timeout
+        raw = socket.create_connection(proxy, timeout=max(timeout, 0.001))
         try:
-            with deadline(raw, timeout):   # the tunnel and the TLS handshake count against the same budget
+            with deadline(raw, end - time.monotonic()):   # tunnel, TLS handshake and exchange share one deadline
                 raw.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode("ascii"))
                 head = b""
                 while b"\r\n\r\n" not in head:
@@ -69,15 +71,22 @@ def connect_transport(proxy: tuple[str, int], ca_file: str | None = None) -> Cal
                     raise P.FetchRefused("fetch_refused" if code == [b"403"] else "fetch_failed", "egress")
                 ctx = ssl.create_default_context(cafile=ca_file)
                 sock = ctx.wrap_socket(raw, server_hostname=host)
-        except Exception:
-            raw.close()
-            raise
-        conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
-        try:
-            return http_get(conn, sock, host, path_qs, headers, timeout, max_body)
+                conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
+                try:
+                    return exchange(conn, sock, host, path_qs, headers, max_body)
+                finally:
+                    conn.close()
         finally:
-            conn.close()
+            raw.close()
     return transport
+
+
+@dataclass
+class _Slot:
+    client: FetchClient
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    last: float = 0.0
+    users: int = 0          # requests holding or waiting on `lock`; guarded by Sidecar.lock
 
 
 class Sidecar:
@@ -91,27 +100,35 @@ class Sidecar:
         self.secret, self.transport = secret, transport
         self.resolver = resolver   # None: the egress gateway resolves, checks and pins the address
         self.buckets = {s: bucket(m["rate_limit_per_min"]) for s, m in registry.items()}
-        self.clients: dict[str, tuple[FetchClient, float, threading.Lock]] = {}   # sha256(lease) -> client
+        self.clients: dict[str, _Slot] = {}   # sha256(lease) -> slot
         self.clock = clock
         self.lock = threading.Lock()
 
-    def _client(self, job_id: str, source_id: str, lease: str) -> tuple[FetchClient, threading.Lock]:
+    def _client(self, job_id: str, source_id: str, lease: str) -> "_Slot":
         """One client per job, with its own lock: a job's requests run one at a time, so its run budget, robots cache
         and redirects are never raced. The client re-checks the lease before each request it sends (design 0004 §6)."""
         key = hashlib.sha256(lease.encode()).hexdigest()   # one client per claim: a re-claimed job starts afresh
         with self.lock:
             now = self.clock()
-            for j in [j for j, (_, t, _) in self.clients.items() if now - t > JOB_IDLE_S]:
+            # only a slot nobody holds or waits on may go: an evicted slot in use would let a second client (own lock,
+            # fresh budget) run beside it for the same lease
+            for j in [j for j, s in self.clients.items() if s.users == 0 and now - s.last > JOB_IDLE_S]:
                 del self.clients[j]
             if key not in self.clients:
                 m = self.registry[source_id]
                 c = FetchClient(m, lambda host, path, body, ct: hashlib.sha256(body).hexdigest(), secret=self.secret,
                                 resolver=self.resolver, transport=self.transport, bucket=self.buckets[source_id],
                                 alive=lambda: self._still_granted(lease, job_id))
-                self.clients[key] = (c, now, threading.Lock())
-            c, _, jl = self.clients[key]
-            self.clients[key] = (c, now, jl)
-            return c, jl
+                self.clients[key] = _Slot(c)
+            slot = self.clients[key]
+            slot.users += 1
+            slot.last = now
+            return slot
+
+    def _release(self, slot: "_Slot") -> None:
+        with self.lock:
+            slot.users -= 1
+            slot.last = self.clock()
 
     def _still_granted(self, lease: str, job_id: str) -> bool:
         try:
@@ -136,10 +153,13 @@ class Sidecar:
                 raise P.FetchRefused("lease_lost") from None
             if source_id not in self.registry:
                 raise P.FetchRefused("unknown_source")
-            client, job_lock = self._client(str(job_id), source_id, lease)
-            with job_lock:
-                status, h, body, target = client._follow(url, P.check_headers(headers), credential=True, robots=True,
-                                                         params=params)
+            slot = self._client(str(job_id), source_id, lease)
+            try:
+                with slot.lock:
+                    status, h, body, target = slot.client._follow(url, P.check_headers(headers), credential=True,
+                                                                  robots=True, params=params)
+            finally:
+                self._release(slot)
             return {"status": status, "headers": {k: h[k] for k in PASS_HEADERS if k in h},
                     "host": target.host, "path": target.path, "body_b64": base64.b64encode(body).decode("ascii")}
         except P.FetchRefused as e:

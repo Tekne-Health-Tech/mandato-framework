@@ -84,6 +84,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Every FROM, workflow image and action is pinned
         run: python3 scripts/check_images.py
+      - name: Lock platform digests match the registry index
+        run: python3 scripts/check_image_platforms.py
       - name: Build mandato-worker and mandato-tools
         run: infra/images/build.sh ci
       - name: Images run as non-root

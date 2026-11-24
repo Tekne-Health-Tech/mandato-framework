@@ -37,8 +37,14 @@ MAX_MISSED_BEATS = 3   # at the 60 s default, 3 min of a database outage: far in
 def hard_exit() -> None:   # pragma: no cover - replaced in tests
     """The lease is gone while a handler still runs: another worker may reclaim and rerun the job. A thread cannot be
     stopped from outside, so the process ends at once; its open transaction rolls back (design 0004 §4.1)."""
-    log.critical("lease lost while running: exiting so the job cannot run twice")
-    logging.shutdown()
+    # No logging call here: a handler blocked on its lock or a full pipe would hold this thread while the job runs on.
+    # One non-blocking write to stderr, best effort, then exit.
+    try:
+        import fcntl
+        fcntl.fcntl(2, fcntl.F_SETFL, fcntl.fcntl(2, fcntl.F_GETFL) | os.O_NONBLOCK)
+        os.write(2, b"mandato.worker CRITICAL lease lost while running: exiting so the job cannot run twice\n")
+    except Exception:   # noqa: BLE001 - nothing may stop the exit
+        pass
     os._exit(70)
 
 
