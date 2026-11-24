@@ -159,3 +159,7 @@ jobs:
       - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
           allow-licenses: MIT, MIT-0, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, 0BSD, MPL-2.0, CC0-1.0, Unlicense, BlueOak-1.0.0, Python-2.0
+          # Reviewed per-package exceptions (AGENTS.md rule 2). The first five declare MIT or Unlicense in their package
+          # metadata; GitHub's scan adds attribution/Unicode/public-domain notices it cannot map to the list. caniuse-lite
+          # is browser-support data under CC-BY-4.0 (attribution only), pulled in by the Expo web build. None is copyleft.
+          allow-dependencies-licenses: pkg:npm/big-integer, pkg:npm/css-in-js-utils, pkg:npm/inline-style-prefixer, pkg:npm/unicode-match-property-value-ecmascript, pkg:npm/xmlbuilder, pkg:npm/caniuse-lite
