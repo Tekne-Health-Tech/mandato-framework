@@ -48,6 +48,7 @@ interface SyncOptions {
   store: SyncStore;
   sha256(body: string): Promise<string>;
   verify(manifest: Manifest): boolean;
+  minGenerationAtBuild: number;
 }
 
 export type SyncResult = { status: 'updated' | 'not-modified' | 'failed' };
@@ -75,7 +76,7 @@ function isBundle(value: unknown, count: number): value is BundleBody {
     && candidate.records.every((record) => typeof record?.id === 'string' && typeof record.updated_at === 'string');
 }
 
-export async function syncPublished({ baseUrl, fetch: fetcher, store, sha256, verify }: SyncOptions): Promise<SyncResult> {
+export async function syncPublished({ baseUrl, fetch: fetcher, store, sha256, verify, minGenerationAtBuild }: SyncOptions): Promise<SyncResult> {
   const current = await store.read();
   try {
     const headers = current.etag ? { 'If-None-Match': current.etag } : undefined;
@@ -84,8 +85,21 @@ export async function syncPublished({ baseUrl, fetch: fetcher, store, sha256, ve
     if (!manifestResponse.ok) return { status: 'failed' };
 
     const parsed: unknown = JSON.parse(await manifestResponse.text());
-    if (!isManifest(parsed) || !verify(parsed) || parsed.generation < current.generation) return { status: 'failed' };
-    const source = current.generation < parsed.min_generation ? {} : current.bundles;
+    if (!isManifest(parsed) || !verify(parsed) || parsed.generation < current.generation || parsed.generation < minGenerationAtBuild) {
+      return { status: 'failed' };
+    }
+
+    const removed = new Set(parsed.takedowns.map(({ id }) => id));
+    const afterTakedowns = structuredClone(current);
+    let takedownApplied = false;
+    for (const bundle of Object.values(afterTakedowns.bundles)) {
+      const records = bundle.records.filter(({ id }) => !removed.has(id));
+      takedownApplied ||= records.length !== bundle.records.length;
+      bundle.records = records;
+    }
+    if (takedownApplied) await store.replace(afterTakedowns);
+
+    const source = current.generation < parsed.min_generation ? {} : afterTakedowns.bundles;
     const bundles: Record<string, LocalBundle> = {};
 
     for (const descriptor of parsed.bundles) {
@@ -103,7 +117,6 @@ export async function syncPublished({ baseUrl, fetch: fetcher, store, sha256, ve
       bundles[descriptor.name] = { sha256: descriptor.sha256, projection: bundle.projection, records: bundle.records };
     }
 
-    const removed = new Set(parsed.takedowns.map(({ id }) => id));
     for (const bundle of Object.values(bundles)) bundle.records = bundle.records.filter(({ id }) => !removed.has(id));
     await store.replace({
       generation: parsed.generation,

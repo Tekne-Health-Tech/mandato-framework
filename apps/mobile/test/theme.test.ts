@@ -8,6 +8,6 @@ import { loadTenantBuildConfig } from '../src/build-config.ts';
 test('generated React Native theme equals core-theme native output', async () => {
   const root = new URL('../../../', import.meta.url);
   const tokens = JSON.parse(await readFile(new URL('tenants/demo/theme/tokens.json', root).pathname, 'utf8'));
-  const config = loadTenantBuildConfig(new URL(root).pathname, 'tenants/demo', {});
+  const config = loadTenantBuildConfig(new URL(root).pathname, 'tenants/demo', { NODE_ENV: 'development' });
   assert.deepEqual(config.theme, toNative(tokens));
 });

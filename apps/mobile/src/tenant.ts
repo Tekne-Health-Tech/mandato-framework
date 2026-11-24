@@ -7,6 +7,7 @@ interface TenantRuntime {
   slug: string;
   variant: 'citizen';
   publishBaseUrl: string;
+  minGenerationAtBuild: number;
   enabledModules: string[];
   publishKeys: Array<{ key_id: string; public_key: string; role: 'current' | 'next' }>;
   causes: Array<{ slug: string; name: string; icon: string }>;

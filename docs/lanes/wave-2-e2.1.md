@@ -9,33 +9,40 @@
 - Local demo publication server command: `pnpm --dir apps/mobile serve:published`. Override production source with `MANDATO_PUBLISH_BASE_URL`.
 - CI runs mobile tests through `pnpm test`, compiles mobile TypeScript through root `npx tsc -p .`, and exports static web output with telemetry disabled.
 
+## Fix round
+
+- Takedowns now commit immediately after manifest signature and generation checks, in a transaction separate from bundle downloads; failed downloads cannot restore withdrawn records.
+- Builds embed `min_generation_at_build` from the tenant's published manifest, and sync rejects older manifests, including on a fresh store.
+- Publication URLs require HTTPS. Development alone may use HTTP for `localhost` or `127.0.0.1`; release builds fail when `MANDATO_PUBLISH_BASE_URL` is missing.
+- Expo upgraded to stable SDK 58.0.23, newest stable npm release at least 14 days old on 2026-11-24. SDK-managed packages use exact versions from `expo@58.0.23`'s `bundledNativeModules.json`.
+
 ## Exact versions
 
 All versions are exact. Registry publication dates are UTC and precede implementation date (2026-11-24) by more than two weeks.
 
 | Package | Version | Published |
 | --- | --- | --- |
-| `expo` | `54.0.21` | 2025-10-28 |
-| `expo-router` | `6.0.14` | 2025-10-28 |
-| `expo-sqlite` | `16.0.9` | 2025-11-03 |
-| `expo-crypto` | `15.0.7` | 2025-09-11 |
-| `expo-constants` | `18.0.10` | 2025-10-21 |
-| `expo-font` | `14.0.9` | 2025-10-09 |
-| `expo-linking` | `8.0.8` | 2025-09-11 |
-| `expo-status-bar` | `3.0.8` | 2025-09-11 |
-| `@expo/metro-runtime` | `6.1.2` | 2025-09-12 |
-| `@expo/vector-icons` | `15.0.3` | 2025-10-22 |
-| `react` | `19.1.0` | 2025-03-28 |
-| `react-dom` | `19.1.0` | 2025-03-28 |
-| `react-native` | `0.81.5` | 2025-10-21 |
-| `react-native-web` | `0.21.0` | 2025-07-25 |
-| `react-native-safe-area-context` | `5.6.2` | 2025-10-28 |
-| `react-native-screens` | `4.16.0` | 2025-09-04 |
+| `expo` | `58.0.23` | 2026-11-03 |
+| `expo-router` | `58.0.30` | 2026-11-03 |
+| `expo-sqlite` | `58.0.15` | 2026-10-31 |
+| `expo-crypto` | `58.0.7` | 2026-10-16 |
+| `expo-constants` | `58.0.15` | 2026-11-03 |
+| `expo-font` | `58.0.11` | 2026-10-28 |
+| `expo-linking` | `58.0.16` | 2026-11-03 |
+| `expo-status-bar` | `58.0.4` | 2026-10-21 |
+| `@expo/metro-runtime` | `58.0.17` | 2026-11-03 |
+| `@expo/vector-icons` | `15.0.2` | 2025-08-28 |
+| `react` | `19.3.0` | 2026-09-09 |
+| `react-dom` | `19.3.0` | 2026-09-09 |
+| `react-native` | `0.88.1` | 2026-10-27 |
+| `react-native-web` | `0.21.4` | 2026-10-08 |
+| `react-native-safe-area-context` | `5.11.1` | 2026-11-03 |
+| `react-native-screens` | `4.30.1` | 2026-10-28 |
 | `tweetnacl` | `1.0.3` | 2020-02-10 |
 | `yaml` | `2.9.1` | 2026-09-11 |
-| `@types/react` | `19.1.10` | 2025-08-11 |
+| `@types/react` | `19.3.0` | 2026-09-09 |
 | `@types/node` | `22.10.2` | 2024-12-11 |
-| `typescript` | `5.6.3` | 2024-10-08 |
+| `typescript` | `6.0.3` | 2026-04-16 |
 
 ## Verification
 
@@ -46,14 +53,18 @@ All versions are exact. Registry publication dates are UTC and precede implement
 | Wrong bundle sha256 rejected; previous data retained | PASS |
 | ETag 304 performs no write | PASS |
 | Takedown removes matching record | PASS |
+| Takedown commits before a later bundle fetch failure | PASS |
+| Fresh store rejects manifest below `min_generation_at_build` | PASS |
+| Release build rejects missing publication URL | PASS |
+| Development rejects public HTTP publication URL | PASS |
 | Failed fetch retains previous data | PASS |
 | Full-snapshot tombstone removes absent record | PASS |
 | Generated mobile theme equals `native.js` output | PASS |
 | `pnpm install --frozen-lockfile` | PASS |
-| `pnpm test` | PASS — 104 tests |
+| `pnpm test` | PASS — 109 tests |
 | `npx tsc -p .` | PASS |
 | `pnpm --dir apps/mobile typecheck` | PASS |
 | `EXPO_NO_TELEMETRY=1 npx expo export --platform web` from `apps/mobile` | PASS — 12 static routes |
 | `scripts/check-boundaries.sh` | PASS |
 
-Tests were added before implementation and observed failing because their target modules did not exist. No device/store build, real E2.2 screen content, push, PWA, login or `gabinete` implementation was added.
+Fix-round tests were added before implementation and observed failing on each missing B1-B3 behavior. No device/store build, real E2.2 screen content, push, PWA, login or `gabinete` implementation was added.

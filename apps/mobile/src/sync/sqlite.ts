@@ -32,4 +32,5 @@ export const syncStore = (baseUrl: string, store: SyncStore) => syncPublished({
   store,
   sha256: (body) => Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, body),
   verify: (manifest) => verifyManifest(manifest, tenant.publishKeys),
+  minGenerationAtBuild: tenant.minGenerationAtBuild,
 });

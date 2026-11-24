@@ -23,7 +23,7 @@ export default function TabLayout() {
           options={{
             title: tab.label,
             tabBarAccessibilityLabel: tab.label,
-            tabBarIcon: ({ color, size }) => <Ionicons accessibilityLabel={tab.label} name={tab.icon} color={color} size={size} />,
+            tabBarIcon: ({ color, size }) => <Ionicons accessibilityLabel={tab.label} name={tab.icon} color={typeof color === 'number' ? colors.link : color ?? colors.link} size={size} />,
           }}
         />
       ))}
