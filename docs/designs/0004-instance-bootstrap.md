@@ -19,7 +19,7 @@ The framework has a schema, a migrator, staff auth, a demo reset and a connector
 ```
 infra/
   compose/compose.yaml        # generated per instance by `mandato instance up` from tenant.yaml (§8); template + overlays
-  compose/networks.md         # what can reach what (the test in §8 checks it)
+  compose/networks.md         # what can reach what (the test in §9 checks it)
   images/lock.json            # image, platform, digest, source, release date, licence scope (§7)
   images/worker/Dockerfile    # FROM <lock digest>; workers/requirements.txt --require-hashes; uid 10001
   images/api/Dockerfile       # FROM <lock digest>; pnpm install --frozen-lockfile --prod; uid 10002
