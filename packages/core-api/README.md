@@ -19,3 +19,11 @@ const api = createApi({
 Operator commands (`pnpm mandato ...`): `keys init`, `staff bootstrap-chief`, `auth check`. See `packages/core-config/bin/mandato.js`.
 
 Tests: `tests/core-api.test.js` (no network or database) and `test/api-pg.test.js` (run by `packages/db/test/run.sh`).
+
+## Demo instance (E0.6)
+
+`pnpm mandato demo reset tenants/demo mandato_demo` drops and rebuilds a fictitious mandate: core and module migrations,
+`tenants/demo/seed.sql`, staff keys under a development KEK, and four synthetic staff (one per role, `@example.org`) with
+real ciphertext. It refuses any database whose name does not end in `_demo` or `_dev`, and any tenant without a `seed.sql`.
+The development KEK comes from `MANDATO_KEK_00000000_0000_7000_8000_00000000deef` or is created in
+`<tenantDir>/.mandato-demo.env` (mode 0600, git-ignored). Synthetic data only; never point it at a real mandate.

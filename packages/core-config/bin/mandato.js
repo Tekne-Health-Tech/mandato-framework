@@ -8,6 +8,7 @@
 //                                              as migrator: the bootstrap invitation of the first chefe_gabinete
 // mandato auth check <tenantDir> --project-ref <ref> --api-url <https url>
 //                                              checks the hosted auth settings (SUPABASE_ACCESS_TOKEN, auth:read)
+// mandato demo reset <tenantDir> <database>    rebuilds the fictitious mandate (database name must end in _demo/_dev)
 import { loadTenant } from '../src/load.js';
 import { bootstrap, migrate } from '../../db/src/migrate.js';
 
@@ -16,11 +17,12 @@ const usage = () => {
   console.error('usage: mandato validate <tenantDir> [--strict] | bootstrap|migrate <tenantDir> <database>\n'
     + '       mandato keys init <tenantDir> <database> --kek-id <uuid>\n'
     + '       mandato staff bootstrap-chief <tenantDir> <database> --name <name> --email <email>\n'
-    + '       mandato auth check <tenantDir> --project-ref <ref> --api-url <url>');
+    + '       mandato auth check <tenantDir> --project-ref <ref> --api-url <url>\n'
+    + '       mandato demo reset <tenantDir> <database>');
   process.exit(2);
 };
 // Two-word operator commands; every flag takes a value and any unknown flag or extra argument is a usage error.
-const TWO = { 'keys init': ['kek-id'], 'staff bootstrap-chief': ['name', 'email'], 'auth check': ['project-ref', 'api-url'] };
+const TWO = { 'demo reset': [], 'keys init': ['kek-id'], 'staff bootstrap-chief': ['name', 'email'], 'auth check': ['project-ref', 'api-url'] };
 const two = `${argv[0]} ${argv[1]}`;
 if (TWO[two]) {
   const pos = []; const flags = {};
@@ -33,7 +35,11 @@ if (TWO[two]) {
   if (pos.length !== (two === 'auth check' ? 1 : 2) || TWO[two].some((f) => !(f in flags))) usage();
   const op = await import('../../core-api/src/operator.js');
   try {
-    if (two === 'keys init') {
+    if (two === 'demo reset') {
+      const { demoReset } = await import('../../core-api/src/demo.js');
+      const r = await demoReset(pos[0], pos[1]);
+      console.log(`demo reset: ${r.database} rebuilt with ${r.staff} synthetic staff${r.kekFile ? `; development KEK written to ${r.kekFile}` : ''}`);
+    } else if (two === 'keys init') {
       const created = await op.keysInit(pos[0], pos[1], { kekId: flags['kek-id'] });
       console.log(created.length ? `keys init: created ${created.join(', ')}` : 'keys init: all staff keys already exist');
       for (const line of op.KEK_RECOVERY_STEPS) console.log(line);

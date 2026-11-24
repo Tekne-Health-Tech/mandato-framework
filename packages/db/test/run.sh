@@ -289,5 +289,8 @@ echo "# API against Postgres (design 0002 §9, test 5 and 7): operator CLI, hook
 ok "core-api end to end (packages/core-api/test/api-pg.test.js)" bash -c "cd $ROOT && TEST_DB=$DB node --test packages/core-api/test/api-pg.test.js 2>&1"
 psql -X -q -U postgres -d postgres -c "drop database if exists ${DB}_api" >/dev/null
 
+echo "# demo reset (E0.6): guards, rebuild, synthetic staff readable with the dev KEK, rerun"
+ok "mandato demo reset (packages/core-api/test/demo-pg.test.js)" bash -c "cd $ROOT && TEST_DB=$DB node --test packages/core-api/test/demo-pg.test.js 2>&1"
+
 echo "# summary: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
