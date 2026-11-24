@@ -69,14 +69,15 @@ def parse(expr: str) -> Cron:
     return Cron(*(frozenset(v) for v in vals[:4]), frozenset(dow), fields[2] == "*", fields[4] == "*")
 
 
-def due_minutes(spec: Cron, tz: str, last_check: datetime | None, now: datetime) -> list[datetime]:
-    """UTC minutes in (last_check, now] at which `spec` fires in `tz`, at most the last 60. No last check: only now."""
+def due_minutes(spec: Cron, tz: str, last_check: datetime | None, now: datetime, cap: bool = True) -> list[datetime]:
+    """UTC minutes in (last_check, now] at which `spec` fires in `tz`, at most the last 60. No last check: only now.
+    cap=False walks the whole window (bounded to 7 days); the scheduler uses it only to count skipped minutes."""
     try:
         zone = ZoneInfo(tz)
     except (ZoneInfoNotFoundError, ValueError):
         raise CronError("unknown timezone") from None
     end = now.astimezone(timezone.utc).replace(second=0, microsecond=0)
-    floor = end - timedelta(minutes=MAX_CATCH_UP_MIN - 1)
+    floor = end - timedelta(minutes=(MAX_CATCH_UP_MIN if cap else 7 * 24 * 60) - 1)
     if last_check is None:
         start = end
     else:

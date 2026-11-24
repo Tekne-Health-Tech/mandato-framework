@@ -367,6 +367,9 @@ echo "# connector kit against Postgres (design 0003 §8.5, §9): runner, raw lay
 ok "connector runner and raw layer (workers/core/tests/test_runner_pg.py)" bash -c "cd $ROOT && TEST_DB=$DB MANDATO_REQUIRE_DB=1 python3 -m unittest workers.core.tests.test_runner_pg 2>&1"
 ok "contract suite, database part (reference connector)" bash -c "cd $ROOT && TEST_DB=$DB MANDATO_REQUIRE_DB=1 python3 -m unittest workers.core.tests.test_connector_contract 2>&1"
 
+echo "# instance runtime against Postgres (design 0004 §10): worker loop, scheduler"
+ok "worker loop and scheduler (workers/core/tests/test_runtime_pg.py)" bash -c "cd $ROOT && TEST_DB=$DB MANDATO_REQUIRE_DB=1 python3 -m unittest workers.core.tests.test_runtime_pg 2>&1"
+
 echo "# demo reset (E0.6): guards, rebuild, synthetic staff readable with the dev KEK, rerun"
 ok "mandato demo reset (packages/core-api/test/demo-pg.test.js)" bash -c "cd $ROOT && TEST_DB=$DB node --test packages/core-api/test/demo-pg.test.js 2>&1"
 

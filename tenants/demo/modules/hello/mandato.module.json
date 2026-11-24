@@ -12,6 +12,7 @@
   "mobile": "mobile/index.ts",
   "worker": "worker/hello",
   "settings_schema": "settings.schema.json",
+  "schedules": [{ "id": "daily_greet", "queue": "hello.greet", "cron": "0 7 * * *", "payload": {} }],
   "retention": [{ "table": "greeting_log", "days": 365 }],
   "data_subject": null
 }

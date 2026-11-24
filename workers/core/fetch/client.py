@@ -52,7 +52,7 @@ def tls_transport(ip: str, host: str, path_qs: str, headers: dict[str, str], tim
 
 class FetchClient:
     def __init__(self, manifest: dict, recorder: Recorder, *, secret: Callable[[str], str] | None = None,
-                 resolver: Resolver = resolve, transport: Transport = tls_transport,
+                 resolver: Resolver | None = resolve, transport: Transport = tls_transport,
                  bucket: P.TokenBucket | None = None, budget: P.RunBudget | None = None,
                  alive: Callable[[], bool] = lambda: True):
         self.hosts = list(manifest["hosts"])
@@ -68,10 +68,12 @@ class FetchClient:
             raise P.FetchRefused("lease_lost")
         self.budget.request()
         self.bucket.take()
-        try:
-            ip = P.check_addresses(self.resolver(target.host))
-        except OSError:
-            raise P.FetchRefused("fetch_failed", "dns") from None
+        ip = None   # resolver None: the transport's gateway resolves and checks (fetch sidecar behind egress, design 0004 §3)
+        if self.resolver is not None:
+            try:
+                ip = P.check_addresses(self.resolver(target.host))
+            except OSError:
+                raise P.FetchRefused("fetch_failed", "dns") from None
         try:
             status, h, body = self.transport(ip, target.host, target.path_qs, headers, P.TIMEOUT_S, P.MAX_BODY)
         except P.FetchRefused:

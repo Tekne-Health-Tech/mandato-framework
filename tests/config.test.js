@@ -124,3 +124,30 @@ test('design 0003: connectors[].raw_retention_days is an integer from 1 to 3650'
   assert.deepEqual(loadTenant(copy((t) => { t.connectors[0].raw_retention_days = 90; })).errors, []);
   for (const v of [0, 3651, 1.5, '90']) assert.ok(loadTenant(copy((t) => { t.connectors[0].raw_retention_days = v; })).errors.length > 0, String(v));
 });
+
+// design 0004 §5: scheduling declarations
+test('0004: the demo module schedule and connector cron are valid', () => assert.deepEqual(loadTenant(demo).errors, []));
+test('0004: an unsupported connector cron is an error', () => {
+  const dir = copy((t) => { t.connectors[0].schedule = '0 6 L * *'; });
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('connector ibge-municipios: schedule')));
+});
+test('0004: an unknown timezone is an error', () => {
+  const dir = copy((t) => { t.timezone = 'Nowhere/Land'; });
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('not a known IANA zone')));
+});
+test('0004: a module schedule outside its own queues, a duplicate id or a bad cron is an error', () => {
+  const dir = withHello({ schedules: [{ id: 'aa', queue: 'other.x', cron: '* * * * *' }, { id: 'aa', queue: 'hello.greet', cron: '1/2 * * * *' }] });
+  const errs = loadTenant(dir).errors.join('\n');
+  assert.match(errs, /queue other.x is outside hello/);
+  assert.match(errs, /duplicate schedule aa/);
+  assert.match(errs, /cron field 1: a step needs/);
+});
+test('0004: a schedule payload may not carry a credential', () => {
+  const dir = withHello({ schedules: [{ id: 'aa', queue: 'hello.greet', cron: '* * * * *', payload: { api_key: 'x' } }] });
+  assert.ok(loadTenant(dir).errors.some((e) => e.includes('inline credential')));
+});
+test('0004: tenant schedule overrides must name an existing schedule; enabled is a boolean on connectors', () => {
+  assert.deepEqual(loadTenant(copy((t) => { t.schedules = { 'hello.daily_greet': { enabled: false } }; t.connectors[0].enabled = false; })).errors, []);
+  assert.ok(loadTenant(copy((t) => { t.schedules = { 'hello.nope': { enabled: false } }; })).errors.some((e) => e.includes('names no schedule')));
+  assert.ok(loadTenant(copy((t) => { t.connectors[0].enabled = 'no'; })).errors.length > 0);
+});

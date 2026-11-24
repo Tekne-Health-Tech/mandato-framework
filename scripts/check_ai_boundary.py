@@ -18,7 +18,7 @@ FORBIDDEN_MODULES = ("anthropic", "openai", "google.genai", "google.generativeai
 # Framework-owned trees. workers/core/fetch is the fetch boundary itself (design 0003 §3): the only worker code that
 # opens sockets. Module connectors stay under every rule above, so a connector cannot import a network library.
 EXEMPT = ("workers/core/contracts/", "workers/core/tests/", "workers/core/fetch/", "workers/core/connectors/",
-          "workers/core/testing/")
+          "workers/core/testing/", "workers/core/runtime/", "workers/core/egress/")
 
 
 def forbidden_module(name: str) -> bool:

@@ -45,6 +45,7 @@ class Deps:
     budget: Callable[[], P.RunBudget] = P.RunBudget
     heartbeat_s: float = 60.0
     user: str = "worker_c1"
+    http_factory: Callable | None = None   # (lease, recorder) -> Http; None: in-process FetchClient
     hooks: dict[str, Callable] = field(default_factory=dict)  # test seams: "before_tx2", "lock" (bypass advisory lock)
 
 
@@ -79,16 +80,19 @@ def _finish(conn, token: str, ok: bool, code: str | None) -> str:
     return conn.run("select core.finish_job(:t, :o, :e)", t=token, o=ok, e=code)[0][0]
 
 
-def run(deps: Deps, token: str, job_id: str, payload: dict) -> str:
-    """Runs one claimed job to its end; returns the job's new state."""
+def run(deps: Deps, token: str, job_id: str, payload: dict, heartbeat=None) -> str:
+    """Runs one claimed job to its end; returns the job's new state. The worker loop passes its own heartbeat
+    (design 0004 §4.1); called alone (tests, tools) the runner keeps the lease alive itself."""
     conn = connect(deps.database, deps.user)
-    hb = Heartbeat(deps, token)
-    hb.start()
+    hb = heartbeat or Heartbeat(deps, token)
+    if heartbeat is None:
+        hb.start()
     try:
         return _run(deps, conn, hb, token, job_id, payload)
     finally:
-        hb.stop_ev.set()
-        hb.join(5)
+        if heartbeat is None:
+            hb.stop_ev.set()
+            hb.join(5)
         conn.close()
 
 
@@ -154,8 +158,11 @@ def _fail(conn, token, run_id, code) -> str:
 def _collect_and_apply(deps, conn, hb, token, connector, source_id, tenant, run_id, cursor_before) -> str:
     m = connector.manifest
     recorder = R.Recorder(conn, deps.store, token, run_id, source_id)
-    client = FetchClient(m, recorder, secret=deps.secret, resolver=deps.resolver, transport=deps.transport,
-                         bucket=deps.bucket(m["rate_limit_per_min"]), budget=deps.budget(), alive=lambda: not hb.lost.is_set())
+    if deps.http_factory is not None:   # the fetch sidecar (design 0004 §6); the worker still records under its lease
+        client = deps.http_factory(token, recorder)
+    else:
+        client = FetchClient(m, recorder, secret=deps.secret, resolver=deps.resolver, transport=deps.transport,
+                             bucket=deps.bucket(m["rate_limit_per_min"]), budget=deps.budget(), alive=lambda: not hb.lost.is_set())
     ctx = Ctx(source_id, tenant.get("params") or {}, client)
     cursors = dict(cursor_before or {})
     records, issues = [], []

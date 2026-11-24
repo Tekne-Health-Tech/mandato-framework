@@ -15,7 +15,11 @@ def connect(database: str, user: str = "worker_c1") -> pg8000.native.Connection:
     if host.startswith("/"):
         kw["unix_sock"] = f"{host}/.s.PGSQL.{port}"
     else:
-        kw.update(host=host, port=port, ssl_context=None if host in ("localhost", "127.0.0.1") else True)
+        # TLS with certificate and host name checks except on loopback or an explicit local `PGSSLMODE=disable`
+        # (the compose-internal Postgres of a local instance). Staging reaches the managed database through `dbgw`,
+        # which carries the database's real host name as its network alias, so verification still names that host.
+        plain = host in ("localhost", "127.0.0.1") or os.environ.get("PGSSLMODE") == "disable"
+        kw.update(host=host, port=port, ssl_context=None if plain else True)
     return pg8000.native.Connection(**kw)
 
 
