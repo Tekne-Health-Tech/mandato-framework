@@ -1,6 +1,6 @@
 # Design 0003 — Connector kit, runner and raw/normalized layers (E3.1)
 
-Status: **Draft (v2)** · 2026-11-24 · Builds on design 0001 (contract 0.1.1) and 0002. Owner: architecture backbone. v2 answers the Codex review `egm/0003/stage1-codex.md`; §12 maps each finding.
+Status: **Draft (v3)** · 2026-11-24 · Builds on design 0001 (contract 0.1.1) and 0002. Owner: architecture backbone. v2 answers the Codex review `egm/0003/stage1-codex.md`; v3 answers the re-check `egm/0003/stage2-codex.md`. §12 maps each finding.
 
 ## 1. Problem
 
@@ -31,6 +31,8 @@ class ConnectorManifest(TypedDict):
     hosts: list[str]                           # NEW: exact HTTPS host names this source may reach
     rate_limit_per_min: int; data_class: DataClass; natural_key: list[str]
     target_table: str                          # NEW: "<schema>.<table>" the records go to
+    sync: Literal["incremental", "snapshot"]   # NEW: snapshot = each ok run holds the full current set (§4)
+    deleted_column: str | None                 # NEW: required iff sync == "incremental"; boolean column flagging upstream removals
 
 class Response(TypedDict):                     # NEW
     status: int; headers: dict[str, str]; body: bytes; raw_ref: str  # raw_ref = sha256 hex of body
@@ -89,10 +91,16 @@ The connector never receives a secret. `ConnectorContext` has no `secret()`. The
 - `RawStore` protocol: `put(sha256, data) -> storage_key`, `get(storage_key) -> bytes`, `delete(storage_key)`. Framework ships `FsRawStore` (dev, demo, tests). The object-storage store (private Supabase Storage bucket) belongs to the deployment lane.
 - **Recording is immediate and independent of the run's outcome.** For each accepted response the client (1) writes the blob, then (2) inserts one `core.raw_object` row in its own short lease-bound transaction. A `rejected`, `failed` or killed run keeps every row it recorded.
 - Crash between (1) and (2) leaves a blob with no row; never a row with no blob. Reconciliation: the prune step (below) deletes blobs older than 24 h that no row references.
-- **Retention and takedown.**
-  - After a successful run, the runner deletes this source's `raw_object` rows older than `raw_retention_days`, and their blobs when no other row references the same `sha256`. Deletes are audited by the row trigger.
-  - `python -m workers.core.connectors.raw purge --sha256 <hex> --reason <code>` removes one object (rows and blob) at once, for a takedown or a record published by mistake. Audited, with the reason code in the audit details.
-- Normalized records that came from a removed object stay until the next run of that source rewrites them; a takedown that must reach normalized data is handled by the module that owns the table (out of scope here).
+- **External deletes happen only after the database commit.** Prune and purge delete `raw_object` rows in a transaction, commit, and only then delete blobs whose `sha256` no row references any more. A crash or rollback before the commit deletes nothing; a crash after it leaves an orphan blob, which the 24 h orphan sweep removes. A blob is never deleted while a committed row points to it.
+- **Retention.** After a successful run (after tx 2 commits), the runner deletes this source's `raw_object` rows older than `raw_retention_days` (tx 4), then the unreferenced blobs. Deletes are audited by the row trigger.
+- **Takedown** (a record published by mistake, a removal request): `python -m workers.core.connectors.takedown --source <id> --key <natural key as JSON> --reason <takedown|error|legal>`, run by the operator as `worker_c1` with a lease of its own job (`core.takedown`). In one transaction it:
+  1. deletes the normalized row with that natural key from the source's `target_table`;
+  2. inserts `core.suppression (source_id, key_sha256)` (SHA-256 of the canonical JSON of the natural key), so the runner drops a record with that key on every later run (counted as `suppressed` in the run stats) and it cannot come back;
+  3. deletes the `raw_object` rows of every object that produced the record, when the operator passes `--sha256` (the object can hold other records; deleting it is an operator choice, not automatic);
+  4. writes `audit.write('takedown_<reason>', '<target_table>', null, {"count": n})`. The reason travels as a registered audit **action** term (`takedown_takedown`, `takedown_error`, `takedown_legal`, registered by `0004`), so `audit.details_ok` stays unchanged.
+
+  Then, after commit, unreferenced blobs are deleted. Lifting a suppression is a separate audited command (`--lift`).
+- **Records removed upstream.** For `sync: snapshot` sources, tx 2 also deletes rows of `target_table` whose natural key is not in the run's record set (counted as `deleted`). A snapshot table must be written by one source only; the loader refuses two snapshot connectors with the same `target_table`. For `sync: incremental` sources the source must expose removals (a status field or a tombstone list) and the connector maps them to a `deleted` flag column; the contract suite requires `incremental` connectors to declare `deleted_column` in the manifest.
 
 ## 5. Runner
 
@@ -101,14 +109,15 @@ The connector never receives a secret. `ConnectorContext` has no `secret()`. The
 1. **Load** (before any write). Find the connector by `source_id` in the `connectors` lists of the enabled modules' workers. Refuse: unknown id; manifest `source_id` different; `data_class > C1`; `auth` invalid (§3.3); `hosts` empty or not host names; `target_table` not matching `^mod_[a-z][a-z0-9]{1,15}\.[a-z_][a-z0-9_]{0,62}$` or not in the connector's own module schema; `params_schema` not strict at every object level; `params` that fail it. Refusal → run not opened, job finished `dead` with the code.
 2. **Lock.** On a dedicated connection the runner takes `pg_try_advisory_lock(hashtext('core.connector_run'), hashtext(source_id))` for the whole run. Not acquired → job finished `done` with code `source_busy` (the next scheduled run picks it up). This avoids wasted work; correctness does not depend on it (step 5).
 3. **Open the run** (tx 1, lease-bound): the `data_source` row must exist (§6.1), else `dead` with `source_not_provisioned`. Update `name`/`terms_url` from the manifest when they differ. Insert `data_source_run` `running`. Read the cursor map (`resource_id → cursor`) and remember it as `cursor_before`. Commit.
-4. **Collect** (no long transaction): `discover`, then per resource `fetch`, `normalize`, `validate`. Between resources the runner calls `core.heartbeat_job(token)`. After collection the runner checks: every `raw_ref` in every batch was recorded in this run; the whole record set (all resources) has a uniform key set that includes `natural_key`, no null natural-key field, no duplicate natural key; every column exists in `target_table` (read from `information_schema` once). A failure here is a validation failure with code `shape`, `natural_key_null`, `natural_key_duplicate` or `unknown_column`.
+4. **Collect** (no long transaction): `discover`, then per resource `fetch`, `normalize`, `validate`. A heartbeat thread, on its own connection, calls `core.heartbeat_job(token)` every 60 s from the moment the job is claimed until it is finished, independent of what the main thread is doing (fetching, sleeping for the rate limit, parsing). If a heartbeat fails (lease gone), the thread sets a stop flag; the main thread checks it before each request and before tx 2 and aborts with `lease_lost`. `reclaim_jobs` uses a stale threshold of 10 minutes, ten missed heartbeats. After collection the runner checks: every `raw_ref` in every batch was recorded in this run; the whole record set (all resources) has a uniform key set that includes `natural_key`, no null natural-key field, no duplicate natural key; every column exists in `target_table` (read from `information_schema` once). A failure here is a validation failure with code `shape`, `natural_key_null`, `natural_key_duplicate` or `unknown_column`.
 5. **Reject or apply** (tx 2, lease-bound, one transaction):
    - Validation failed → run `rejected` with `stats = {records, errors: <count>, codes: {<code>: <count>}}`, `error = 'validation'`; cursor and data unchanged; `core.finish_job(token, false, 'validation')` in the same transaction. Logs carry at most 20 `Issue`s (code and path), never values.
-   - Otherwise: `upsert_rows(tx, target_table, records, natural_key)`; `update core.data_source set cursor = $new, last_success_at = now() where source_id = $1 and cursor is not distinct from $cursor_before` — 0 rows updated → raise `CursorConflict` (another run advanced it); prune (§4); run `ok` with `stats = {records, inserted, updated, unchanged, raw_objects}`; `core.finish_job(token, true, null)` in the same transaction.
+   - Otherwise: drop suppressed records (§4); `upsert_rows(tx, target_table, records, natural_key)`; for `snapshot` sources delete the rows not in the set (§4); `update core.data_source set cursor = $new, last_success_at = now() where source_id = $1 and cursor is not distinct from $cursor_before` — 0 rows updated → raise `CursorConflict` (another run advanced it); run `ok` with `stats = {records, inserted, updated, unchanged, deleted, suppressed, raw_objects}`; `core.finish_job(token, true, null)` in the same transaction.
 6. **Failure.** Any exception rolls back tx 2. Tx 3 marks the run `failed` with `error = <code>` (`cursor_conflict`, `fetch_refused`, `fetch_failed`, `robots_disallowed`, or `internal` for anything else) and calls `finish_job(token, false, <code>)`. The full exception goes to the worker log with record values stripped (only type, code and the framework frame).
-7. **Release** the advisory lock and close the dedicated connection.
+7. **After commit:** retention prune (§4, tx 4 then blobs). A prune failure is logged with its code and leaves the run `ok`.
+8. **Release** the advisory lock, stop the heartbeat thread, close the connections.
 
-The whole run is held in memory, bounded by the 50 MiB per response cap; streaming is a later change if a source needs it.
+The whole run is held in memory, so the run has its own limits: at most `max_run_bytes` of accepted response bodies (default 200 MiB) and at most 10 000 requests. The client counts both per run and refuses the next request with `run_too_large` once either is reached; the run then fails with that code. A source that needs more is split into resources across several runs or gets streaming later.
 
 ## 6. Database changes (`0004_core.sql`, applied by bootstrap)
 
@@ -140,9 +149,13 @@ Owner `core_owner`; `enable` and `force row level security`; policies: `worker_c
 - `core.heartbeat_job(p_token text) returns void` (same grants and checks): sets `locked_at = now()`.
 - `core.reclaim_jobs(p_stale interval default '10 minutes') returns int` (definer, granted to `worker_c1/c2/c3`): every `running` job of the caller's pool classes with `locked_at < now() - p_stale` is requeued (or `dead` if out of attempts) with `last_error = 'lease_expired'` and its lease cleared; every `running` `data_source_run` whose job was reclaimed is marked `failed` / `lease_expired`. To link them, `data_source_run` gains `job_id uuid null references core.job(id)` in `0004`. Who calls `reclaim_jobs` periodically is the worker loop (E0.7); E3.1 ships and tests the function.
 
+### 6.3a `core.suppression` (C1) and audit terms
+
+`core.suppression`: `id uuid pk`, `source_id → data_source`, `key_sha256 text` (`^[0-9a-f]{64}$`, unique with `source_id`), `created_at`, `updated_at`, `lifted_at timestamptz null`. Same treatment as `raw_object` (owner `core_owner`, RLS enabled and forced, `worker_c1` select/insert/update, audit trigger, class comments). `0004` registers the action terms `takedown_takedown`, `takedown_error`, `takedown_legal`, `takedown_lift` and the job queue `core.takedown`.
+
 ### 6.4 Module tables written by connectors
 
-A module table named in `target_table` must: live in the module schema, be owned by the module owner role, have `enable` and `force row level security`, a policy and grants giving `worker_c1` exactly `select, insert, update`, the audit row trigger, column class comments, and a unique constraint on exactly `natural_key`. The DB part of the contract suite (§8) checks all of these; a module migration that misses one fails CI.
+A module table named in `target_table` must: live in the module schema, be owned by the module owner role, have `enable` and `force row level security`, a policy and grants giving `worker_c1` exactly `select, insert, update, delete` (delete for snapshot sync and takedown), the audit row trigger, column class comments, and a unique constraint on exactly `natural_key`. The DB part of the contract suite (§8) checks all of these; a module migration that misses one fails CI.
 
 ## 7. Normalized layer helper
 
@@ -166,6 +179,9 @@ A module table named in `target_table` must: live in the module schema, be owned
 - **Policy:** refuses `http`, port 8443, userinfo, POST; a host of another source; a host resolving to 127.0.0.1, 10.0.0.1, 169.254.169.254, 100.64.0.1, `::1`, `fd00::1`, `::ffff:127.0.0.1`; a redirect to any of these; a forbidden header; a body over the cap. Robots: 404 → allowed; 503 → refused; disallowed path → refused. Credential header absent on a redirect. Rate limit never exceeded (fake clock).
 - **Raw:** identical bodies stored once; rows recorded for `ok`, `rejected` and `failed` runs; a forged `raw_ref` fails the run; blob without row older than 24 h pruned; retention prune deletes old rows and unreferenced blobs only; purge removes rows and blob and is audited.
 - **Runner (Postgres, run.sh):** ok run writes stats, cursor, `last_success_at`, job `done`, all in one commit; validation failure → `rejected`, cursor and data unchanged, job requeued; exception in the upsert → `failed`, nothing partially written; two concurrent runs of one source → one `source_busy` and, with the advisory lock bypassed, the CAS makes one `cursor_conflict` and the cursor never goes backwards; second run with the stored cursor is incremental; unknown source, `data_class C2`, `oauth`, non-strict `params_schema` refused before any write; unprovisioned source → `source_not_provisioned`.
+- **Takedown and removals:** takedown deletes the normalized row, writes the suppression and the audit action, and the next run does not bring the record back (`suppressed = 1`); a snapshot run deletes a record missing upstream; an incremental connector without `deleted_column` is refused; two snapshot connectors on one table refused; audit `details_ok` unchanged.
+- **External deletes:** a failure after the prune delete statement and before commit leaves rows and blobs intact; a crash after commit leaves only an orphan blob, removed by the sweep.
+- **Heartbeat and size:** a fetch that sleeps 12 minutes under a fake clock keeps the lease (heartbeats continue) and `reclaim_jobs` does not touch it; a lost lease aborts the run with `lease_lost` before tx 2; the request after `max_run_bytes` or the 10 001st request is refused with `run_too_large`.
 - **Crash points:** kill after tx 1 → `reclaim_jobs` marks run `failed` / `lease_expired` and requeues the job; kill after tx 2 → nothing to recover (run and job terminal together).
 - **Job functions:** `finish_job` and `heartbeat_job` refuse a wrong pool, a used token, an error with spaces; backoff and `dead` after `max_attempts`.
 - **Contract suite** passes on a reference test connector (`workers/core/tests/fixtures/`) and fails on a negative connector for each rule of §8.
@@ -198,3 +214,14 @@ Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3
 | 10 | Batch shape undefined | §5.4 and §7: shape, null and duplicate checks over the whole run before the first statement |
 | 11 | DB checks and licenses may never run | §8.5 mandatory DB part in the `database` job; §10 hashed requirements and transitive license check. Not accepted: dropping the 14-day rule; it is a selection-time policy of the user, recorded per version, and does not affect reproducibility |
 | notes | `xmax`, robots, logs, `url_path` | §7 PG 15–17 + test; §3.2 step 6 (RFC 9309, fail closed, counted); §5.4–§5.6 codes and paths only; §6.2 `url_path` |
+
+### Re-check (Codex, stage 2): 3 open + 2 new
+
+| # | Finding | Answer |
+| --- | --- | --- |
+| 7 | Takedown leaves normalized data; removals upstream never deleted | §4 takedown command (normalized row + suppression + optional raw), snapshot deletes, `deleted_column` for incremental sources |
+| 8 | Heartbeat only between resources | §5.4 heartbeat thread every 60 s on its own connection, `lease_lost` abort |
+| 9 | Purge reason rejected by `audit.details_ok` | §4/§6.3a reason carried as a registered action term; `details_ok` unchanged |
+| N1 | Blob deleted inside a transaction that may roll back | §4: blobs deleted only after commit, orphans swept |
+| N2 | Run memory unbounded | §5: `max_run_bytes` (200 MiB) and 10 000 requests per run, `run_too_large` |
+
