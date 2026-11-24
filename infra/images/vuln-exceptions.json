@@ -2,13 +2,25 @@
   "comment": "Accepted vulnerability exceptions for the instance images (design 0004 §7). Each entry: id (CVE/GHSA), image (worker|tools), reason, expires (YYYY-MM-DD, at most 90 days ahead). The CI job `supply-chain` fails on a critical or high finding with a fix available unless it is listed here and not expired; scripts/check_images.py refuses expired or open-ended entries.",
   "exceptions": [
     {
-      "id": "CVE-2026-123872",
+      "id": "CVE-2026-123864",
       "image": "tools",
       "reason": "Node.js 22.23.4 binary in the one-shot operator container (no listening socket, runs only the mandato CLI). Fixed in node 22.23.5, published 2026-11-11: the lock's 14-day rule allows it from 2026-11-25; bump infra/images/lock.json and the tools Dockerfile then and remove this entry.",
       "expires": "2026-12-09"
     },
     {
-      "id": "CVE-2026-123864",
+      "id": "CVE-2026-123865",
+      "image": "tools",
+      "reason": "Node.js 22.23.4 binary in the one-shot operator container (no listening socket, runs only the mandato CLI). Fixed in node 22.23.5, published 2026-11-11: the lock's 14-day rule allows it from 2026-11-25; bump infra/images/lock.json and the tools Dockerfile then and remove this entry.",
+      "expires": "2026-12-09"
+    },
+    {
+      "id": "CVE-2026-123866",
+      "image": "tools",
+      "reason": "Node.js 22.23.4 binary in the one-shot operator container (no listening socket, runs only the mandato CLI). Fixed in node 22.23.5, published 2026-11-11: the lock's 14-day rule allows it from 2026-11-25; bump infra/images/lock.json and the tools Dockerfile then and remove this entry.",
+      "expires": "2026-12-09"
+    },
+    {
+      "id": "CVE-2026-123872",
       "image": "tools",
       "reason": "Node.js 22.23.4 binary in the one-shot operator container (no listening socket, runs only the mandato CLI). Fixed in node 22.23.5, published 2026-11-11: the lock's 14-day rule allows it from 2026-11-25; bump infra/images/lock.json and the tools Dockerfile then and remove this entry.",
       "expires": "2026-12-09"

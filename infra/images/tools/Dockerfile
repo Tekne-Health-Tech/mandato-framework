@@ -17,6 +17,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     apt-get update \
  && apt-get install -y --no-install-recommends \
       libc6=2.41-12+deb13u5 libc-bin=2.41-12+deb13u5 zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+      libgssapi-krb5-2=1.21.3-5+deb13u2 libk5crypto3=1.21.3-5+deb13u2 libkrb5-3=1.21.3-5+deb13u2 \
+      libkrb5support0=1.21.3-5+deb13u2 \
  && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99extra-ca
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
