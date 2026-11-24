@@ -41,7 +41,8 @@ const FORBIDDEN = [
 ];
 export function forbiddenStatements(sql) {
   const code = sql.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/'(?:[^']|'')*'/g, "''")
-    .replace(/\breferences\s+core\.\w+\s*\(\s*id\s*\)/gi, 'references ok');   // FK to a core id column is allowed (§7.2)
+    .replace(/\breferences\s+core\.\w+\s*\(\s*id\s*\)/gi, 'references ok')   // FK to a core id column is allowed (§7.2)
+    .replace(/\bexecute\s+function\s+audit\.row_trigger\s*\(\s*\)/gi, 'execute ok');   // the audit row trigger (design 0003 §6.4)
   return FORBIDDEN.filter(([re]) => re.test(code)).map(([, why]) => why);
 }
 
@@ -93,7 +94,10 @@ export function bootstrap(db, tenantDir, superuser = process.env.PGUSER || 'post
       end $$;
       create schema if not exists ${'mod_' + m.short} authorization ${role};
       revoke all on schema ${'mod_' + m.short} from public;
-      grant ${role} to migrator;`);
+      grant ${role} to migrator;
+      grant usage on schema audit to ${role};
+      grant execute on function audit.row_trigger() to ${role};   -- module tables carry the audit trigger (design 0003 §6.4)
+      grant usage on schema ${'mod_' + m.short} to audit_owner;    -- audit.write resolves the entity name; no table rights`);
   }
 }
 

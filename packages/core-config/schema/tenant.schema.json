@@ -229,6 +229,11 @@
           },
           "params": {
             "$ref": "#/$defs/noSecrets"
+          },
+          "raw_retention_days": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3650
           }
         }
       }

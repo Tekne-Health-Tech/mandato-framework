@@ -120,3 +120,7 @@ test('final check 6: a module directory symlinked outside the tenant is refused'
   symlinkSync(outside, target);
   assert.ok(loadTenant(dir).errors.some((e) => e.includes('outside the tenant')));
 });
+test('design 0003: connectors[].raw_retention_days is an integer from 1 to 3650', () => {
+  assert.deepEqual(loadTenant(copy((t) => { t.connectors[0].raw_retention_days = 90; })).errors, []);
+  for (const v of [0, 3651, 1.5, '90']) assert.ok(loadTenant(copy((t) => { t.connectors[0].raw_retention_days = v; })).errors.length > 0, String(v));
+});

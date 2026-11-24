@@ -198,7 +198,7 @@ A module table named in `target_table` must: live in the module schema, be owned
 
 ## 11. Out of scope
 
-Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3.4); scheduler and worker main loop (E0.7); the object-storage `RawStore`; real connectors (E3.2). **Backbone note for E3.2:** the federal legislative radar needs Câmara dos Deputados and Senado open-data connectors (proposições, tramitação, votações), which are not in E3.2's current list (IBGE, Transferegov, DOU). Proposed addition, to be recorded in the mandato-pro backlog.
+Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3.4); scheduler and worker main loop (E0.7); the object-storage `RawStore`; real connectors (E3.2). **Backbone note for E3.2:** the federal legislative radar needs Câmara dos Deputados and Senado open-data connectors (proposições, tramitação, votações), which are not in E3.2's current list (IBGE, Transferegov, DOU). Proposed addition, to be recorded in the planning backlog.
 
 ## 12. Review findings (Codex, stage 1) and where they are answered
 
@@ -237,3 +237,15 @@ Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3
 
 Per the stopping rule (about three review rounds), these three are verified in the implementation's code review instead of a fourth design round.
 
+
+## 13. Implementation notes (E3.1, as built)
+
+Differences from the text above, each covered by a test; the code review checks them.
+
+- **Retention prune runs at the start of each run** (right after tx 1), not after tx 2: tx 2 finishes the job, so its lease is gone afterwards, and audited deletes need one. Same retention, same trigger (a run of the source).
+- **`reclaim_jobs` requeues the job only.** It cannot close the `data_source_run` row: those rows are audited and the caller holds no lease. The next run of the source closes every `running` run of that source whose job is not running (`lease_expired`), inside its own tx 1.
+- **`source_busy`** finishes the job as `done` with no code, since `finish_job` refuses an error code on an ok job; the code goes to the worker log.
+- **Lost lease:** when the lease is gone (heartbeat failure or `invalid lease` from the database), the runner writes nothing and returns `lease_lost`; the next run closes the run row.
+- **Grants added beyond §6:** `migrator` gets `select (source_id)` on `core.data_source` (needed by the `on conflict` arbiter of provisioning); each module owner gets `usage` on schema `audit` and `execute` on `audit.row_trigger()`, and `audit_owner` gets `usage` on each module schema, so module tables can carry the audit trigger. The static screen of module migrations allows exactly `execute function audit.row_trigger()` and nothing else in `audit`.
+- **`params_schema` subset:** the worker validates params with its own small validator (types, `properties`, `required`, `additionalProperties`, `enum`, `pattern`, numeric and length bounds, `items`); the loader refuses any other keyword, so a schema can never be laxer than it reads.
+- **License allow-list:** `MIT-0` added (the license of `scramp`, a `pg8000` dependency); it is MIT without the attribution clause, as permissive as `0BSD`, which was already allowed.

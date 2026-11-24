@@ -1,0 +1,33 @@
+"""Thin pg8000 helpers for workers: connect from PG* env, lease-bound transactions.
+
+Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
+"""
+import os
+from contextlib import contextmanager
+
+import pg8000.native
+
+
+def connect(database: str, user: str = "worker_c1") -> pg8000.native.Connection:
+    host = os.environ.get("PGHOST", "localhost")
+    port = int(os.environ.get("PGPORT", "5432"))
+    kw = {"user": user, "database": database, "password": os.environ.get("PGPASSWORD")}
+    if host.startswith("/"):
+        kw["unix_sock"] = f"{host}/.s.PGSQL.{port}"
+    else:
+        kw.update(host=host, port=port, ssl_context=None if host in ("localhost", "127.0.0.1") else True)
+    return pg8000.native.Connection(**kw)
+
+
+@contextmanager
+def tx(conn: pg8000.native.Connection, token: str | None):
+    """One transaction; with a token it starts with audit.bind_lease (design 0001 §4.5)."""
+    conn.run("begin")
+    try:
+        if token:
+            conn.run("select audit.bind_lease(:t)", t=token)
+        yield conn
+        conn.run("commit")
+    except BaseException:
+        conn.run("rollback")
+        raise

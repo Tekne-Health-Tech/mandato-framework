@@ -23,3 +23,9 @@ test('comments and string literals do not trigger, and FKs to core ids are allow
 });
 test('the demo module migration passes', () =>
   assert.deepEqual(forbiddenStatements(readFileSync(new URL('../tenants/demo/modules/hello/db/migrations/0001_hello.sql', import.meta.url), 'utf8')), []));
+test('only the audit row trigger may be named in audit (design 0003 §6.4)', () => {
+  assert.deepEqual(forbiddenStatements('create trigger audit after insert on mod_x.t for each row execute function audit.row_trigger();'), []);
+  for (const sql of ['create trigger a after insert on mod_x.t for each row execute function audit.write();',
+    "select audit.write('x','mod_x.t',null,'{}');", 'create trigger a after insert on mod_x.t for each row execute function audit.row_trigger(); delete from audit.event;'])
+    assert.ok(forbiddenStatements(sql).includes('object outside the module schema'), sql);
+});
