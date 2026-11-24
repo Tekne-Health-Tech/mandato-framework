@@ -21,6 +21,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY --from=node /app /app
-RUN useradd -u 10005 -M -s /usr/sbin/nologin tools
+# gosu (a Go binary of the Postgres entrypoint, built with an older Go stdlib) is never used here: the entrypoint is
+# the mandato CLI and the image runs as uid 10005. Removing it drops its Go stdlib findings from the scan.
+RUN useradd -u 10005 -M -s /usr/sbin/nologin tools && rm -f /usr/local/bin/gosu
 USER 10005
 ENTRYPOINT ["node", "/app/packages/core-config/bin/mandato.js"]
