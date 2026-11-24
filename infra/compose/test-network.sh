@@ -42,7 +42,7 @@ if [ -f "$STATE/compose.yaml" ]; then docker compose -f "$STATE/compose.yaml" do
 rm -rf "$STATE"
 cleanup() { docker compose -f "$STATE/compose.yaml" down --volumes >/dev/null 2>&1; rm -rf "$WORK"; }
 trap cleanup EXIT
-origin() { printf '{"image":"mandato-worker:dev","user":"10004:10004","read_only":true,"command":["python","/srv/https_server.py","/srv/ca/%s.pem","/srv/ca/%s.key"],"volumes":["%s:/srv/https_server.py:ro","%s:/srv/ca:ro"],"networks":{"outside":{"ipv4_address":"%s","aliases":["%s"]}}}' \
+origin() { printf '{"image":"mandato-worker:dev","user":"10004:10004","read_only":true,"cap_drop":["ALL"],"security_opt":["no-new-privileges:true"],"command":["python","/srv/https_server.py","/srv/ca/%s.pem","/srv/ca/%s.key"],"volumes":["%s:/srv/https_server.py:ro","%s:/srv/ca:ro"],"networks":{"outside":{"ipv4_address":"%s","aliases":["%s"]}}}' \
   "$1" "$1" "$ROOT/infra/compose/test/https_server.py" "$CA" "$2" "$1"; }
 EXTRA="{\"services\":{\"allowed-test\":$(origin allowed.test 11.0.0.10),\"other-test\":$(origin other.test 11.0.0.11)},\"networkPatch\":{\"outside\":{\"ipam\":{\"config\":[{\"subnet\":\"11.0.0.0/24\"}]}}}}"
 echo "# instance up (local shape)"
@@ -96,12 +96,20 @@ ok "the run is ok"                                    test "$(sql "select status
 echo "# 4. the socket and the secrets stay with their pool"
 MOUNTS=$(for c in $(docker compose -f "$F" ps -q); do docker inspect -f '{{.Name}} {{range .Mounts}}{{.Destination}},{{end}}' "$c"; done)
 ok "only worker-c1 and fetch-c1 mount the socket volume" bash -c "echo '$MOUNTS' | grep '/run/mandato-fetch' | grep -v -e worker-c1 -e fetch-c1 | wc -l | grep -qx 0"
+ok "the scheduler and the fetch sidecar mount no tenant code" bash -c "echo '$MOUNTS' | grep -e scheduler -e fetch-c1 | grep -c /srv/tenant | grep -qx 0"
+fails "the fetch sidecar cannot read module code" ex fetch-c1 ls /srv/tenant
 
 echo "# 6. no root, pinned images"
 for c in $(docker compose -f "$F" ps -q); do
   n=$(docker inspect -f '{{.Name}}' "$c"); u=$(docker inspect -f '{{.Config.User}}' "$c")
   ok "$n runs as a non-root uid ($u)" bash -c "[ -n '$u' ] && [ '${u%%:*}' != 0 ] && [ '${u%%:*}' != root ]"
 done
+for c in $(docker compose -f "$F" ps -q); do
+  n=$(docker inspect -f '{{.Name}}' "$c")
+  ok "$n has a read-only root filesystem and no capabilities" bash -c "[ \"\$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}}' $c)\" = 'true [ALL]' ]"
+done
+WID=$(docker image inspect -f '{{.Id}}' mandato-worker:dev)
+ok "workers run the built image by content id" bash -c "[ \"\$(docker inspect -f '{{.Image}}' $(docker compose -f "$F" ps -q worker-c1))\" = '$WID' ]"
 PG=$(docker inspect -f '{{.Config.Image}}' "$(docker compose -f "$F" ps -q postgres)")
 ok "postgres runs the locked digest" bash -c "grep -q \"${PG##*@}\" '$ROOT/infra/images/lock.json'"
 ok "every Dockerfile FROM is in the lock" python3 "$ROOT/scripts/check_images.py"

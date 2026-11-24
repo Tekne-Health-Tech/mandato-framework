@@ -31,26 +31,59 @@ class SecretUnavailable(Exception):
     code = "secret_unavailable"
 
 
-class JobHeartbeat(threading.Thread):
-    """Refreshes one lease every `interval` s on its own connection; sets `lost` when the lease is gone."""
+MAX_MISSED_BEATS = 3   # at the 60 s default, 3 min of a database outage: far inside the 10 min reclaim window
 
-    def __init__(self, database: str, user: str, token: str, interval: float, on_beat: Callable[[], None] = lambda: None):
+
+def hard_exit() -> None:   # pragma: no cover - replaced in tests
+    """The lease is gone while a handler still runs: another worker may reclaim and rerun the job. A thread cannot be
+    stopped from outside, so the process ends at once; its open transaction rolls back (design 0004 §4.1)."""
+    log.critical("lease lost while running: exiting so the job cannot run twice")
+    logging.shutdown()
+    os._exit(70)
+
+
+class JobHeartbeat(threading.Thread):
+    """Refreshes one lease every `interval` s on its own connection. The lease counts as lost, and `on_lost` runs,
+    when the database refuses it or when beats keep failing (`MAX_MISSED_BEATS` in a row, reconnecting each time)."""
+
+    def __init__(self, database: str, user: str, token: str, interval: float, on_beat: Callable[[], None] = lambda: None,
+                 on_lost: Callable[[], None] = lambda: None, connect_fn: Callable = connect):
         super().__init__(daemon=True)
         self.database, self.user, self.token, self.interval, self.on_beat = database, user, token, interval, on_beat
+        self.on_lost, self.connect_fn = on_lost, connect_fn
         self.stop_ev, self.lost = threading.Event(), threading.Event()
 
+    def _lose(self) -> None:
+        self.lost.set()
+        if not self.stop_ev.is_set():
+            self.on_lost()
+
     def run(self) -> None:
-        conn = connect(self.database, self.user)
+        conn, missed = None, 0
         try:
             while not self.stop_ev.wait(self.interval):
                 try:
+                    if conn is None:
+                        conn = self.connect_fn(self.database, self.user)
                     conn.run("select core.heartbeat_job(:t)", t=self.token)
+                    missed = 0
                     self.on_beat()
-                except Exception:
-                    self.lost.set()
-                    return
+                except Exception as e:
+                    if "invalid lease" in str(e):
+                        return self._lose()
+                    missed += 1
+                    log.warning("heartbeat failed: type=%s missed=%d", type(e).__name__, missed)
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                        conn = None
+                    if missed >= MAX_MISSED_BEATS:
+                        return self._lose()
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
 
     def stop(self) -> None:
         self.stop_ev.set()
@@ -89,7 +122,7 @@ class Worker:
     def __init__(self, reg: Registry, pool: str, database: str, *, connector_run: Callable | None = None,
                  worker_id: str | None = None, heartbeat_s: float = 60, reclaim_s: float = 60,
                  idle: tuple[float, float] = (2, 10), alive_file: str | None = "/run/mandato/alive",
-                 sleep: Callable[[float], None] | None = None):
+                 sleep: Callable[[float], None] | None = None, on_lease_lost: Callable[[], None] = hard_exit):
         self.reg, self.pool, self.database = reg, pool, database
         self.user = f"worker_{pool}"
         self.queues = reg.queues(pool)
@@ -101,6 +134,7 @@ class Worker:
         self.sleep = sleep or self.stopping.wait
         self._last_reclaim = 0.0
         self.conn = None
+        self.on_lease_lost = on_lease_lost
 
     # ---------------------------------------------------------------- liveness (design 0004 §4.1 step 5)
     def touch(self) -> None:
@@ -144,7 +178,7 @@ class Worker:
         if not rows:
             return False
         job_id, queue, payload, token = rows[0]
-        hb = JobHeartbeat(self.database, self.user, token, self.heartbeat_s, on_beat=self.touch)
+        hb = JobHeartbeat(self.database, self.user, token, self.heartbeat_s, on_beat=self.touch, on_lost=self.on_lease_lost)
         hb.start()
         try:
             state = self.dispatch(job_id, queue, payload or {}, token, hb)

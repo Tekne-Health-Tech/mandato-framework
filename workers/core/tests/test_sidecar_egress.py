@@ -63,12 +63,55 @@ class SidecarTest(unittest.TestCase):
         self.assertEqual(self.sc.handle({"lease": "L1", "url": self.url, "source_id": "x"}), {"error": "bad_request"})
         self.assertEqual(self.sc.handle(["x"]), {"error": "bad_request"})
 
+    def client_of(self, lease):
+        return self.sc.clients[hashlib.sha256(lease.encode()).hexdigest()][0]
+
     def test_budgets_are_per_job(self):
         self.sc.handle({"lease": "L1", "url": self.url})
-        c1 = self.sc.clients["job-1"][0]
+        c1 = self.client_of("L1")
         self.leases["L3"] = ("job-3", self.m["source_id"])
         self.sc.handle({"lease": "L3", "url": self.url})
-        self.assertIsNot(self.sc.clients["job-3"][0].budget, c1.budget)
+        self.assertIsNot(self.client_of("L3").budget, c1.budget)
+
+    def test_the_lease_is_checked_again_before_every_request(self):
+        """A lease that ends mid-request (job finished or reclaimed) stops the next hop: no request leaves after it."""
+        first = self.url
+        def expire_then_redirect(ip, host, path_qs, headers, timeout, max_body):
+            self.seen.append((ip, host, path_qs, dict(headers)))
+            if path_qs == "/robots.txt":
+                return 404, {}, b""
+            del self.leases["L1"]   # the job ends while this response is in flight
+            return 302, {"location": "/api/outra"}, b""
+        self.sc.transport = expire_then_redirect
+        out = self.sc.handle({"lease": "L1", "url": first})
+        self.assertEqual(out, {"error": "lease_lost"})
+        self.assertFalse(any(s[2] == "/api/outra" for s in self.seen))
+
+    def test_requests_of_one_job_run_one_at_a_time_within_its_budget(self):
+        """The run budget and robots cache of a job are never raced: its requests are serialized."""
+        import time
+        state = {"now": 0, "max": 0}
+        lock = threading.Lock()
+        inner = fake_transport(self.seen)
+        def slow(*a):
+            with lock:
+                state["now"] += 1; state["max"] = max(state["max"], state["now"])
+            time.sleep(0.01)
+            try:
+                return inner(*a)
+            finally:
+                with lock:
+                    state["now"] -= 1
+        self.sc.transport = slow
+        self.sc.handle({"lease": "L1", "url": self.url})
+        self.client_of("L1").budget = P.RunBudget(max_requests=5)
+        out = []
+        ts = [threading.Thread(target=lambda: out.append(self.sc.handle({"lease": "L1", "url": self.url}))) for _ in range(20)]
+        for t in ts: t.start()
+        for t in ts: t.join(10)
+        self.assertEqual(state["max"], 1)
+        self.assertEqual(sum(1 for o in out if "status" in o), 5)
+        self.assertEqual(sum(1 for o in out if o.get("error") == "run_too_large"), 15)
 
     def test_socket_round_trip_records_under_the_worker(self):
         d = tempfile.mkdtemp()

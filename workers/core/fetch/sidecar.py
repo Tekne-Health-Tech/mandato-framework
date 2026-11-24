@@ -26,7 +26,7 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler
 
 from . import policy as P
-from .client import FetchClient
+from .client import FetchClient, deadline, http_get
 
 log = logging.getLogger("mandato.fetch.sidecar")
 SECRET_REF = re.compile(r"^[a-z][a-z0-9_]{1,60}$")
@@ -55,34 +55,26 @@ def connect_transport(proxy: tuple[str, int], ca_file: str | None = None) -> Cal
     def transport(ip, host, path_qs, headers, timeout, max_body):
         raw = socket.create_connection(proxy, timeout=timeout)
         try:
-            raw.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode("ascii"))
-            head = b""
-            while b"\r\n\r\n" not in head:
-                chunk = raw.recv(1024)
-                if not chunk or len(head) > 8192:
-                    raise P.FetchRefused("fetch_failed", "egress")
-                head += chunk
-            status_line = head.split(b"\r\n", 1)[0]
-            if status_line.split(b" ")[1:2] != [b"200"]:
-                code = status_line.split(b" ")[1:2]
-                raise P.FetchRefused("fetch_refused" if code == [b"403"] else "fetch_failed", "egress")
-            ctx = ssl.create_default_context(cafile=ca_file)
-            sock = ctx.wrap_socket(raw, server_hostname=host)
+            with deadline(raw, timeout):   # the tunnel and the TLS handshake count against the same budget
+                raw.sendall(f"CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n".encode("ascii"))
+                head = b""
+                while b"\r\n\r\n" not in head:
+                    chunk = raw.recv(1024)
+                    if not chunk or len(head) > 8192:
+                        raise P.FetchRefused("fetch_failed", "egress")
+                    head += chunk
+                status_line = head.split(b"\r\n", 1)[0]
+                if status_line.split(b" ")[1:2] != [b"200"]:
+                    code = status_line.split(b" ")[1:2]
+                    raise P.FetchRefused("fetch_refused" if code == [b"403"] else "fetch_failed", "egress")
+                ctx = ssl.create_default_context(cafile=ca_file)
+                sock = ctx.wrap_socket(raw, server_hostname=host)
         except Exception:
             raw.close()
             raise
         conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
-        conn.sock = sock
         try:
-            conn.request("GET", path_qs, headers={**headers, "Host": host, "Accept-Encoding": "identity"})
-            r = conn.getresponse()
-            length = r.getheader("Content-Length")
-            if length is not None and length.isdigit() and int(length) > max_body:
-                raise P.FetchRefused("fetch_refused", "body_too_large")
-            body = r.read(max_body + 1)
-            if len(body) > max_body:
-                raise P.FetchRefused("fetch_refused", "body_too_large")
-            return r.status, {k.lower(): v for k, v in r.getheaders()}, body
+            return http_get(conn, sock, host, path_qs, headers, timeout, max_body)
         finally:
             conn.close()
     return transport
@@ -99,23 +91,33 @@ class Sidecar:
         self.secret, self.transport = secret, transport
         self.resolver = resolver   # None: the egress gateway resolves, checks and pins the address
         self.buckets = {s: bucket(m["rate_limit_per_min"]) for s, m in registry.items()}
-        self.clients: dict[str, tuple[FetchClient, float]] = {}
+        self.clients: dict[str, tuple[FetchClient, float, threading.Lock]] = {}   # sha256(lease) -> client
         self.clock = clock
         self.lock = threading.Lock()
 
-    def _client(self, job_id: str, source_id: str) -> FetchClient:
+    def _client(self, job_id: str, source_id: str, lease: str) -> tuple[FetchClient, threading.Lock]:
+        """One client per job, with its own lock: a job's requests run one at a time, so its run budget, robots cache
+        and redirects are never raced. The client re-checks the lease before each request it sends (design 0004 §6)."""
+        key = hashlib.sha256(lease.encode()).hexdigest()   # one client per claim: a re-claimed job starts afresh
         with self.lock:
             now = self.clock()
-            for j in [j for j, (_, t) in self.clients.items() if now - t > JOB_IDLE_S]:
+            for j in [j for j, (_, t, _) in self.clients.items() if now - t > JOB_IDLE_S]:
                 del self.clients[j]
-            if job_id not in self.clients:
+            if key not in self.clients:
                 m = self.registry[source_id]
                 c = FetchClient(m, lambda host, path, body, ct: hashlib.sha256(body).hexdigest(), secret=self.secret,
-                                resolver=self.resolver, transport=self.transport, bucket=self.buckets[source_id])
-                self.clients[job_id] = (c, now)
-            c, _ = self.clients[job_id]
-            self.clients[job_id] = (c, now)
-            return c
+                                resolver=self.resolver, transport=self.transport, bucket=self.buckets[source_id],
+                                alive=lambda: self._still_granted(lease, job_id))
+                self.clients[key] = (c, now, threading.Lock())
+            c, _, jl = self.clients[key]
+            self.clients[key] = (c, now, jl)
+            return c, jl
+
+    def _still_granted(self, lease: str, job_id: str) -> bool:
+        try:
+            return str(self.grant(lease)[0]) == job_id
+        except Exception:
+            return False
 
     def handle(self, req: dict) -> dict:
         try:
@@ -134,8 +136,10 @@ class Sidecar:
                 raise P.FetchRefused("lease_lost") from None
             if source_id not in self.registry:
                 raise P.FetchRefused("unknown_source")
-            client = self._client(str(job_id), source_id)
-            status, h, body, target = client._follow(url, P.check_headers(headers), credential=True, robots=True, params=params)
+            client, job_lock = self._client(str(job_id), source_id, lease)
+            with job_lock:
+                status, h, body, target = client._follow(url, P.check_headers(headers), credential=True, robots=True,
+                                                         params=params)
             return {"status": status, "headers": {k: h[k] for k in PASS_HEADERS if k in h},
                     "host": target.host, "path": target.path, "body_b64": base64.b64encode(body).decode("ascii")}
         except P.FetchRefused as e:
@@ -227,19 +231,17 @@ class SidecarHttp:
 def main() -> None:   # pragma: no cover - exercised by the network test
     import argparse
     from workers.core.connectors.db import connect
-    from workers.core.runtime.registry import load_registry
+    from workers.core.runtime.spec import load_runtime
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance", required=True)
-    ap.add_argument("--tenant-root")
+    ap.add_argument("--runtime", required=True, help="runtime.json written by `mandato instance up`; no module code runs here")
     ap.add_argument("--database", required=True)
     ap.add_argument("--socket", default="/run/mandato/fetch.sock")
     ap.add_argument("--egress", default="egress:3128")
     ap.add_argument("--ca-file", default=None)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    reg = load_registry(a.instance, a.tenant_root)
-    manifests = {s: c.manifest for s, (c, _) in reg.connectors.items() if s in reg.enabled_sources}
+    manifests = load_runtime(a.runtime).connectors
     allowed = {m["auth_secret_ref"] for m in manifests.values() if m.get("auth") == "api_key"}
     conn = connect(a.database, "fetch_c1")
     db_lock = threading.Lock()

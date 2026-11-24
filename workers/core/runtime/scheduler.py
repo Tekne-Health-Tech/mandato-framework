@@ -23,17 +23,33 @@ from .registry import Registry, Schedule
 log = logging.getLogger("mandato.scheduler")
 
 
+KEY_TIME = "%Y-%m-%dT%H:%MZ"
+
+
 def minute_key(identity: str, t: datetime) -> str:
-    return f"sched:{identity}:{t.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%MZ')}"
+    return f"sched:{identity}:{t.astimezone(timezone.utc).strftime(KEY_TIME)}"
+
+
+def last_minute(conn, s: Schedule) -> datetime | None:
+    """The last minute already scheduled, read from the immutable key, never from `run_after`: a retry moves a job's
+    `run_after` forward (core.finish_job backoff), which must not hide the minutes in between. The key's timestamp is
+    fixed-width UTC, so the greatest key is the latest minute."""
+    prefix = f"sched:{s.identity}:"
+    key = conn.run("""select max(idempotency_key) from core.job where queue = :q
+                      and left(idempotency_key, length(:p)) = :p""", q=s.queue, p=prefix)[0][0]
+    if key is None:
+        return None
+    try:
+        return datetime.strptime(key[len(prefix):], KEY_TIME).replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError("schedule key") from None
 
 
 def tick_one(conn, s: Schedule, tz: str, now: datetime) -> tuple[int, int]:
     """Returns (inserted, skipped) for one schedule; one transaction."""
-    prefix = f"sched:{s.identity}:"
     conn.run("begin")
     try:
-        last = conn.run("""select max(run_after) from core.job where queue = :q
-                            and left(idempotency_key, length(:p)) = :p""", q=s.queue, p=prefix)[0][0]
+        last = last_minute(conn, s)
         skipped = 0
         if last is not None:
             floor = now.astimezone(timezone.utc).replace(second=0, microsecond=0) - timedelta(minutes=MAX_CATCH_UP_MIN - 1)
@@ -92,14 +108,13 @@ def run_forever(reg: Registry, database: str, stop: threading.Event, alive_file:
 
 def main() -> None:   # pragma: no cover - exercised by the instance tests
     import argparse
-    from .registry import load_registry
+    from .spec import load_runtime
     ap = argparse.ArgumentParser()
-    ap.add_argument("--instance", required=True)
-    ap.add_argument("--tenant-root")
+    ap.add_argument("--runtime", required=True, help="runtime.json written by `mandato instance up`; no module code runs here")
     ap.add_argument("--database", required=True)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    reg = load_registry(a.instance, a.tenant_root)
+    reg = load_runtime(a.runtime)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())

@@ -5,12 +5,13 @@
 // It never creates a hosted project, account, bucket or DNS record.
 // Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
 import { randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { stringify } from 'yaml';
 import { loadTenant } from '../../packages/core-config/src/load.js';
+import { expectedMigrations } from '../../packages/db/src/migrate.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const LOCK = JSON.parse(readFileSync(join(ROOT, 'infra/images/lock.json'), 'utf8'));
@@ -56,6 +57,7 @@ export function composeFor(o) {
   const pgHost = local ? 'postgres' : o.dbEndpoint.host;
   const images = { worker: 'mandato-worker:dev', tools: 'mandato-tools:dev', ...o.images };
   const secretsDir = join(o.stateDir, 'secrets');
+  const hardened = { read_only: true, cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'] };
   const pgEnv = (role) => ({ PGHOST: pgHost, PGPORT: String(local ? 5432 : o.dbEndpoint.port), PGPASSWORD_FILE: `/run/secrets/pg_${role}`,
     ...(local ? { PGSSLMODE: 'disable' } : {}) });
   const alive = { test: ['CMD', 'python', '-c', 'import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime("/run/mandato/alive")<180 else 1)'],
@@ -67,11 +69,14 @@ export function composeFor(o) {
   const ro = (src, dst) => ({ type: 'bind', source: src, target: dst, read_only: true });
   const tenant = ro(resolve(o.tenantDir), '/srv/tenant');
   const inst = ro(join(o.stateDir, 'instance.json'), '/srv/state/instance.json');
+  // the scheduler and the fetch sidecar read data only (design 0004 §4.2): no tenant code is mounted into them
+  const runtime = ro(join(o.stateDir, 'runtime.json'), '/srv/state/runtime.json');
   const secret = (role) => ro(join(secretsDir, `pg_${role}`), `/run/secrets/pg_${role}`);
   const services = {};
   const networks = { db: { internal: true }, outside: {} };
   if (local) {
-    services.postgres = { image: pinned('postgres'), user: '999:999', networks: ['db'], restart: 'unless-stopped',
+    services.postgres = { image: pinned('postgres'), user: '999:999', networks: ['db'], restart: 'unless-stopped', ...hardened,
+      tmpfs: ['/var/run/postgresql:mode=0775,uid=999,gid=999', '/tmp'],
       environment: { POSTGRES_PASSWORD_FILE: '/run/secrets/pg_postgres' }, volumes: ['pgdata:/var/lib/postgresql/data', secret('postgres')],
       healthcheck: { test: ['CMD', 'pg_isready', '-U', 'postgres'], interval: '5s', timeout: '5s', retries: 20 } };
   } else {
@@ -84,8 +89,8 @@ export function composeFor(o) {
   }
   const dependsDb = local ? { postgres: { condition: 'service_healthy' } } : { dbgw: { condition: 'service_started' } };
   services.scheduler = { ...as(UID.scheduler), networks: ['db'], environment: pgEnv('scheduler'), healthcheck: alive,
-    command: ['python', '-m', 'workers.core.runtime.scheduler', '--instance', '/srv/state/instance.json', '--tenant-root', '/srv/tenant', '--database', o.database],
-    volumes: [tenant, inst, secret('scheduler')], depends_on: dependsDb };
+    command: ['python', '-m', 'workers.core.runtime.scheduler', '--runtime', '/srv/state/runtime.json', '--database', o.database],
+    volumes: [runtime, secret('scheduler')], depends_on: dependsDb };
   for (const pool of o.pools) {
     const svc = { ...as(UID.worker), networks: ['db'], environment: pgEnv(`worker_${pool}`), healthcheck: alive,
       command: ['python', '-m', 'workers.core.runtime.worker', '--pool', pool, '--instance', '/srv/state/instance.json', '--tenant-root', '/srv/tenant', '--database', o.database],
@@ -93,10 +98,10 @@ export function composeFor(o) {
     if (pool === 'c1') {
       svc.volumes.push('raw:/var/lib/mandato/raw', 'sock_c1:/run/mandato-fetch');
       services['fetch-c1'] = { ...as(UID.fetch), networks: ['db', 'fetch_c1'], environment: pgEnv('fetch_c1'),
-        command: ['python', '-m', 'workers.core.fetch.sidecar', '--instance', '/srv/state/instance.json', '--tenant-root', '/srv/tenant',
+        command: ['python', '-m', 'workers.core.fetch.sidecar', '--runtime', '/srv/state/runtime.json',
           '--database', o.database, '--socket', '/run/mandato-fetch/fetch.sock', '--egress', 'egress:3128',
           ...(o.fetchCa ? ['--ca-file', '/run/secrets/fetch_ca.pem'] : [])],
-        volumes: [tenant, inst, secret('fetch_c1'), 'sock_c1:/run/mandato-fetch',
+        volumes: [runtime, secret('fetch_c1'), 'sock_c1:/run/mandato-fetch',
           ...o.secretRefs.map((r) => ro(join(secretsDir, 'connectors', r), `/run/secrets/${r}`)),
           ...(o.fetchCa ? [ro(o.fetchCa, '/run/secrets/fetch_ca.pem')] : [])],
         depends_on: { ...dependsDb, egress: { condition: 'service_started' } } };
@@ -108,10 +113,11 @@ export function composeFor(o) {
     services[`worker-${pool}`] = svc;
   }
   for (const s of Object.values(services)) if (s.healthcheck === undefined) delete s.healthcheck;
-  services.tools = { image: images.tools, profiles: ['tools'], networks: ['db'], user: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
-    environment: { PGHOST: pgHost, PGPORT: String(local ? 5432 : o.dbEndpoint.port), PGUSER: 'postgres', PGPASSFILE: '/srv/state/secrets/pgpass',
+  // tools never runs as root: as its image's own uid when the operator is root, else as the operator (who owns pgpass)
+  services.tools = { image: images.tools, profiles: ['tools'], networks: ['db'], user: toolsUser(), ...hardened, tmpfs: ['/tmp'],
+    environment: { HOME: '/tmp', PGHOST: pgHost, PGPORT: String(local ? 5432 : o.dbEndpoint.port), PGUSER: 'postgres', PGPASSFILE: '/run/secrets/pgpass',
       ...(local ? { PGSSLMODE: 'disable' } : { PGSSLMODE: 'verify-full' }) },
-    volumes: [tenant, ro(o.stateDir, '/srv/state')], depends_on: dependsDb };
+    volumes: [tenant, ro(join(secretsDir, 'pgpass'), '/run/secrets/pgpass')], depends_on: dependsDb };
   const doc = { name: o.project, services, networks,
     volumes: { ...(local ? { pgdata: {} } : {}), ...(o.pools.includes('c1') ? { raw: {}, sock_c1: {} } : {}) } };
   if (o.extra) {
@@ -123,6 +129,26 @@ export function composeFor(o) {
 }
 
 // ---------------------------------------------------------------- helpers
+/** Preflight on the `core.instance` row read from an existing database ('none': no core schema, 'empty': no row). */
+export function preflightIdentity(row, slug, env, database) {
+  if (row === 'none' || row === 'empty') return;
+  const [have, haveEnv] = row.split('|');
+  if (have !== slug) throw new Error(`database ${database} belongs to instance '${have}', not '${slug}'`);
+  if (haveEnv && haveEnv !== env) throw new Error(`database ${database} is a '${haveEnv}' instance, not '${env}'`);
+  if (!haveEnv && env !== 'local') throw new Error(`database ${database} predates the env column; only --env local may adopt it`);
+}
+const TOOLS_UID = 10005;
+export function toolsUser() {
+  const uid = process.getuid?.() ?? 0;
+  return uid === 0 ? `${TOOLS_UID}:${TOOLS_UID}` : `${uid}:${process.getgid?.() ?? uid}`;
+}
+
+/** The local image's content id (sha256:…): compose runs exactly what was built and checked, never a re-tagged image. */
+function imageId(ref) {
+  const id = sh('docker', ['image', 'inspect', '-f', '{{.Id}}', ref], { quiet: true });
+  if (!/^sha256:[0-9a-f]{64}$/.test(id)) throw new Error(`instance up: image ${ref} has no content id`);
+  return id;
+}
 function sh(cmd, args, { input, quiet = false, env } = {}) {
   const r = spawnSync(cmd, args, { encoding: 'utf8', input, env: env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
   if (r.status !== 0) throw new Error(`${cmd} ${args.slice(0, 4).join(' ')}…: ${(r.stderr || r.stdout || '').trim().split('\n').slice(-5).join(' | ')}`);
@@ -170,11 +196,13 @@ export function up(tenantDir, o) {
 
   const rendered = step('render', () => renderInstance(tenantDir, o.env));
   writeFileSync(join(stateDir, 'instance.json'), `${JSON.stringify(rendered, null, 2)}\n`);
-  const images = { worker: 'mandato-worker:dev', tools: 'mandato-tools:dev', ...o.images };
+  const tags = { worker: 'mandato-worker:dev', tools: 'mandato-tools:dev', ...o.images };
+  const images = step('images', () => ({ worker: imageId(tags.worker), tools: imageId(tags.tools) }));
   const probe = step('registry', () => JSON.parse(sh('docker', ['run', '--rm', '--network', 'none', '-v', `${tenantDir}:/srv/tenant:ro`,
     '-v', `${join(stateDir, 'instance.json')}:/srv/state/instance.json:ro`, images.worker,
     'python', '-m', 'workers.core.runtime.registry', '/srv/state/instance.json', '--tenant-root', '/srv/tenant'], { quiet: true })));
   writeFileSync(join(stateDir, 'egress-hosts.txt'), probe.egress_hosts.map((h) => `${h}\n`).join(''));
+  writeFileSync(join(stateDir, 'runtime.json'), `${JSON.stringify(probe.runtime, null, 2)}\n`);
   for (const ref of probe.secret_refs) {
     if (!existsSync(join(secretsDir, 'connectors', ref))) throw new Error(`instance up: connector secret ${ref} is missing in ${join(secretsDir, 'connectors')}`);
   }
@@ -187,6 +215,7 @@ export function up(tenantDir, o) {
   }
   const pgpass = ['postgres', ...LOGIN_ROLES].map((r) => `*:*:*:${r}:${pw[r]}`).join('\n');
   writeFileSync(join(secretsDir, 'pgpass'), `${pgpass}\n`, { mode: 0o600 });
+  if ((process.getuid?.() ?? 0) === 0) chownSync(join(secretsDir, 'pgpass'), TOOLS_UID, TOOLS_UID);
   const kek = secretFile(join(secretsDir, 'demo_kek'), () => randomBytes(32).toString('base64'));
 
   const project = `mandato-${rendered.slug}-${o.env}`;
@@ -203,6 +232,16 @@ export function up(tenantDir, o) {
   const psql = (sql, db = 'postgres') => sh('docker', ['compose', '-f', file, 'run', '--rm', '-T', '--entrypoint', 'psql', 'tools',
     '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-d', db, '-f', '-'], { input: sql, quiet: true });
 
+  // Preflight, read-only and before any database write (design 0004 §8): an existing database must already be this
+  // instance's. A database of another slug or env is refused before roles, migrations or a demo reset touch it.
+  const exists = psql(`select count(*) from pg_database where datname = '${database}'`) === '1';
+  step('preflight', () => {
+    if (!exists) return;
+    const row = psql(`select case when to_regclass('core.instance') is null then 'none'
+      else coalesce((select slug || '|' || coalesce(env, '') from core.instance limit 1), 'empty') end`, database);
+    preflightIdentity(row, rendered.slug, o.env, database);
+  });
+
   // Login roles exist before bootstrap so migrator can authenticate; 0001 hardens their attributes, the password stays.
   // A password is (re)set only when its secret was just created or the role has none, so a second `up` changes nothing.
   step('role passwords', () => {
@@ -216,7 +255,6 @@ export function up(tenantDir, o) {
     }).join('\n');
     if (sql.trim()) psql(sql);
   });
-  const exists = psql(`select count(*) from pg_database where datname = '${database}'`) === '1';
   const demo = existsSync(join(tenantDir, 'seed.sql'));
   const kekEnv = { [`MANDATO_KEK_${DEMO_KEK_ID.replace(/-/g, '_')}`]: kek.value };
   if (demo && (!exists || o.resetDemo)) {
@@ -250,7 +288,12 @@ export function check(tenantDir, o) {
     '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', '-d', database, '-c', sql], { quiet: true });
   const { config } = loadTenant(resolve(tenantDir));
   out.push({ what: 'instance registered', pass: psql("select slug || '|' || coalesce(env, '') from core.instance") === `${config.instance.slug}|${o.env}` });
-  out.push({ what: 'migrations recorded', pass: Number(psql("select count(*) from audit.migration_log where module_id = 'core'")) >= 5 });
+  const recorded = psql("select module_id || ':' || migration_id || '=' || sha256 from audit.migration_log order by 1").split('\n').filter(Boolean);
+  const expected = expectedMigrations(resolve(tenantDir)).map((m) => `${m.module}:${m.id}=${m.sha256}`).sort();
+  const extra = recorded.filter((r) => !expected.includes(r));
+  const missing = expected.filter((e) => !recorded.includes(e));
+  out.push({ what: 'migrations recorded and unchanged', pass: !extra.length && !missing.length,
+    detail: extra.length || missing.length ? `${missing.length} missing or changed, ${extra.length} unknown` : undefined });
   out.push({ what: 'staff keys present', pass: Number(psql("select count(distinct purpose) from core.data_key where state = 'active'")) >= 3 });
   out.push({ what: 'runtime roles hardened', pass: psql(`select count(*) from pg_roles where rolname in (${LOGIN_ROLES.map((r) => `'${r}'`).join(',')}) and (rolsuper or rolbypassrls or rolcreaterole or rolcreatedb)`) === '0' });
   for (const r of out) process.stdout.write(`${r.pass ? 'ok  ' : 'FAIL'} ${r.what}${r.detail ? ` (${r.detail})` : ''}\n`);

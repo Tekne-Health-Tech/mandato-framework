@@ -74,7 +74,11 @@ class Heartbeat(threading.Thread):
         self.stop_ev, self.lost = threading.Event(), threading.Event()
 
     def run(self) -> None:
-        conn = connect(self.deps.database, self.deps.user)
+        try:
+            conn = connect(self.deps.database, self.deps.user)
+        except Exception:   # no heartbeat means no lease: the run stops before its next write
+            self.lost.set()
+            return
         try:
             while not self.stop_ev.wait(self.deps.heartbeat_s):
                 try:

@@ -35,6 +35,7 @@ class Schedule:
     data_class: str
     cron: Cron
     payload: dict
+    expr: str = ""        # the cron expression, kept for runtime.json
 
 
 @dataclass
@@ -119,7 +120,8 @@ def load_registry(instance_json: str | Path, tenant_root: str | Path | None = No
             raise RegistryError(f"schedule {key}: queue {s['queue']} has no registered job")
         if not overrides.get(key, {}).get("enabled", True):
             continue
-        reg.schedules.append(Schedule(f"mod:{key}", s["queue"], _cls(job), _cron(s["cron"], key), dict(s.get("payload") or {})))
+        reg.schedules.append(Schedule(f"mod:{key}", s["queue"], _cls(job), _cron(s["cron"], key), dict(s.get("payload") or {}),
+                                      s["cron"]))
     for c in doc.get("connectors") or []:
         sid = c["source_id"]
         reg.tenant_connectors[sid] = c
@@ -135,8 +137,19 @@ def load_registry(instance_json: str | Path, tenant_root: str | Path | None = No
             continue
         reg.enabled_sources.add(sid)
         reg.schedules.append(Schedule(f"conn:{sid}", CONNECTOR_QUEUE, _cls(connector), _cron(c["schedule"], sid),
-                                      {"source_id": sid}))
+                                      {"source_id": sid}, c["schedule"]))
     return reg
+
+
+def runtime_doc(reg: Registry) -> dict:
+    """What the scheduler and the fetch sidecar need, as data (design 0004 §4.2): they read this file and never import
+    module code, which runs only inside the workers' trust boundary (and in the probe that writes this file)."""
+    def manifest(m: dict) -> dict:
+        return {k: (class_name(v) if k == "data_class" else v) for k, v in m.items()}
+    return {"slug": reg.slug, "env": reg.env, "timezone": reg.timezone,
+            "schedules": [{"identity": s.identity, "queue": s.queue, "data_class": s.data_class, "cron": s.expr,
+                           "payload": s.payload} for s in reg.schedules],
+            "connectors": {sid: manifest(reg.connectors[sid][0].manifest) for sid in sorted(reg.enabled_sources)}}
 
 
 def _cron(expr: str, what: str) -> Cron:
@@ -162,7 +175,8 @@ def main() -> None:
                       "schedules": [s.identity for s in reg.schedules],
                       "egress_hosts": sorted({h for s in reg.enabled_sources for h in reg.connectors[s][0].manifest["hosts"]}),
                       "secret_refs": sorted({c.manifest["auth_secret_ref"] for c, _ in reg.connectors.values()
-                                             if c.manifest.get("auth") == "api_key"})}))
+                                             if c.manifest.get("auth") == "api_key"}),
+                      "runtime": runtime_doc(reg)}))
 
 
 if __name__ == "__main__":

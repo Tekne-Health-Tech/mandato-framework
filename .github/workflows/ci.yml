@@ -90,6 +90,36 @@ jobs:
         run: |
           for i in worker tools; do u=$(docker inspect -f '{{.Config.User}}' mandato-$i:ci); echo "$i $u"; [ -n "$u" ] && [ "${u%%:*}" != 0 ] && [ "${u%%:*}" != root ]; done
 
+  supply-chain:
+    name: SBOM and vulnerability scan (images)
+    runs-on: ubuntu-latest
+    env:
+      SYFT: anchore/syft@sha256:825cad3a952c87676a6d07e9a3bb05ac9c401d598360070e970aa46d54c1727e    # v1.38.0
+      GRYPE: anchore/grype@sha256:e4e8ddb34f01da61a7b25155dcd71a1851802077a564b624c61f2f534d9c9c0b   # v0.104.0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Exceptions are well-formed and unexpired
+        run: python3 scripts/check_images.py
+      - name: Build images
+        run: infra/images/build.sh ci
+      - name: SBOM (SPDX) for each image
+        run: |
+          mkdir -p sbom
+          for i in worker tools; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$SYFT" "mandato-$i:ci" -o spdx-json > "sbom/mandato-$i.spdx.json"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: sbom/
+      - name: No critical or high vulnerability with a fix, except listed and unexpired
+        run: |
+          for i in worker tools; do
+            python3 -c "import json,sys; e=[x for x in json.load(open('infra/images/vuln-exceptions.json'))['exceptions'] if x['image']==sys.argv[1]]; print('ignore:'); [print(f'  - vulnerability: {x[\"id\"]}') for x in e]" "$i" > "/tmp/grype-$i.yaml"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "/tmp/grype-$i.yaml:/grype.yaml:ro" "$GRYPE" \
+              "mandato-$i:ci" -c /grype.yaml --only-fixed --fail-on high
+          done
+
   network:
     name: Network test (connector release gate)
     runs-on: ubuntu-latest

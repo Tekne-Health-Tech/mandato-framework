@@ -101,6 +101,19 @@ export function bootstrap(db, tenantDir, superuser = process.env.PGUSER || 'post
   }
 }
 
+/** Every migration this tenant's history must hold, with its file hash: core, then each enabled module (design 0004 §8,
+ * `instance check`: recorded and unchanged). */
+export function expectedMigrations(tenantDir) {
+  const out = coreFiles().map((f) => ({ module: 'core', id: f, sha256: sha(readFileSync(join(CORE_DIR, f), 'utf8')) }));
+  for (const m of localModules(tenantDir)) {
+    if (!m.migrations || !existsSync(m.migrations)) continue;
+    for (const f of readdirSync(m.migrations).filter((x) => x.endsWith('.sql')).sort()) {
+      out.push({ module: m.id, id: f, sha256: sha(readFileSync(join(m.migrations, f), 'utf8')) });
+    }
+  }
+  return out;
+}
+
 export function migrate(db, tenantDir, migrator = 'migrator') {
   const applied = new Map(psql(db, migrator, "select module_id || ':' || migration_id || '=' || sha256 from audit.migration_log")
     .split('\n').filter(Boolean).map((l) => l.split('=')));

@@ -47,6 +47,7 @@ class RuntimePg(unittest.TestCase):
 
     def worker(self, **kw):
         from workers.core.runtime.worker import Worker
+        kw.setdefault("on_lease_lost", lambda: None)
         w = Worker(self.reg, "c1", DB, alive_file=None, heartbeat_s=kw.pop("heartbeat_s", 60), **kw)
         w.conn = self.connect(DB, "worker_c1")
         self.addCleanup(w.conn.close)
@@ -198,6 +199,18 @@ class RuntimePg(unittest.TestCase):
         self.assertEqual(sum(r["failed"] for r in results), 0)
         self.assertEqual(self._count("sched:mod:rt.every_minute:"), 4)
         self.assertEqual(self._count("sched:mod:rt.off:"), 0)   # disabled by the tenant override
+
+    def test_a_retried_job_does_not_hide_later_minutes(self):
+        """finish_job's backoff moves run_after forward; the scheduler's watermark is the key's minute, not run_after."""
+        from workers.core.runtime.scheduler import tick
+        self.su.run("delete from core.job where left(idempotency_key, 6) = 'sched:'")
+        t0 = datetime(2026, 11, 24, 12, 0, 5, tzinfo=UTC)
+        c = self._sched_conn()
+        tick(c, self.reg, t0)
+        self.su.run("""update core.job set run_after = run_after + interval '5 minutes'
+                        where idempotency_key = 'sched:mod:rt.every_minute:2026-11-24T12:00Z'""")
+        self.assertEqual(tick(c, self.reg, t0 + timedelta(minutes=1))["inserted"], 1)
+        self.assertEqual(self._count("sched:mod:rt.every_minute:2026-11-24T12:01Z"), 1)
 
     def test_catch_up_is_capped_and_skips_are_counted(self):
         from workers.core.runtime.scheduler import tick
