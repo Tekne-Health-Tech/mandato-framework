@@ -9,7 +9,7 @@ The framework has a schema, a migrator, staff auth, a demo reset and a connector
 ## 2. Constraints
 
 - One instance per mandate (ADR-0002). Staging and production of a mandate are separate instances with separate keys.
-- No container has a general internet route. Every connection that leaves the internal networks goes through one of two gateways that hold a fixed destination allow-list (§3): `egress` (HTTPS to the hosts of enabled connector manifests) and `dbgw` (TCP to the one configured database endpoint, staging only). This holds for local and staging alike; the network test (§8) proves it for both shapes.
+- No container has a general internet route. Every connection that leaves the internal networks goes through one of two gateways that hold a fixed destination allow-list (§3): `egress` (HTTPS to the hosts of enabled connector manifests) and `dbgw` (TCP to the one configured database endpoint, staging only). This holds for local and staging alike; the network test (§9) proves it for both shapes.
 - Secrets never live in the repository or in `tenant.yaml`: KEK, database passwords, hook secret and API keys come from the environment or a secret file mounted at runtime (`*_secret_ref`). Worker containers have no secret mount; `JobContext.secret()` raises `secret_unavailable` in the images (secrets are used only by sidecars).
 - Creating hosted resources (a Supabase project, a VPS) costs money and binds accounts. The bootstrap **never creates them**: the operator creates them and passes their identifiers; the bootstrap configures what exists. Who owns those accounts is the open decision L3.
 - Images: digest-pinned per platform, recorded in a lock file with source and release date, at least 14 days old when chosen, with SBOM and vulnerability scan in CI (§7).
@@ -18,7 +18,7 @@ The framework has a schema, a migrator, staff auth, a demo reset and a connector
 
 ```
 infra/
-  compose/compose.yaml        # generated per instance by `mandato instance up` from tenant.yaml (§6); template + overlays
+  compose/compose.yaml        # generated per instance by `mandato instance up` from tenant.yaml (§8); template + overlays
   compose/networks.md         # what can reach what (the test in §8 checks it)
   images/lock.json            # image, platform, digest, source, release date, licence scope (§7)
   images/worker/Dockerfile    # FROM <lock digest>; workers/requirements.txt --require-hashes; uid 10001
@@ -54,7 +54,7 @@ Ingress for the API (the Supabase auth hook calls it) and the API's own outbound
 
 ### 4.2 Registry
 
-Module workers are found from `tenant.yaml` → enabled modules → `mandato.module.json` `worker` path → the package's `JOBS` and `CONNECTORS` lists (no free-form import strings). `check_registry` (0003) runs at start; a refusal stops the worker with a clear error. The trust boundary is the worker process: every enabled module's code runs in it, so modules are trusted at code-review level, not isolated from each other at runtime (§5 limits the sidecar to the job the process currently holds).
+Module workers are found from `tenant.yaml` → enabled modules → `mandato.module.json` `worker` path → the package's `JOBS` and `CONNECTORS` lists (no free-form import strings). `check_registry` (0003) runs at start; a refusal stops the worker with a clear error. The trust boundary is the worker process: every enabled module's code runs in it, so modules are trusted at code-review level, not isolated from each other at runtime (§6 limits the sidecar to the job the process currently holds).
 
 ### 4.3 Pools
 
