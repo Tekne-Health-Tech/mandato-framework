@@ -230,14 +230,15 @@ def main() -> None:   # pragma: no cover - exercised by the network test
     from workers.core.runtime.registry import load_registry
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tenant", required=True)
+    ap.add_argument("--instance", required=True)
+    ap.add_argument("--tenant-root")
     ap.add_argument("--database", required=True)
     ap.add_argument("--socket", default="/run/mandato/fetch.sock")
     ap.add_argument("--egress", default="egress:3128")
     ap.add_argument("--ca-file", default=None)
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    reg = load_registry(a.tenant)
+    reg = load_registry(a.instance, a.tenant_root)
     manifests = {s: c.manifest for s, (c, _) in reg.connectors.items() if s in reg.enabled_sources}
     allowed = {m["auth_secret_ref"] for m in manifests.values() if m.get("auth") == "api_key"}
     conn = connect(a.database, "fetch_c1")

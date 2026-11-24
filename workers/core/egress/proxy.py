@@ -112,14 +112,13 @@ class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def main() -> None:   # pragma: no cover - exercised by the network test
     import argparse
-    from workers.core.runtime.registry import load_registry
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tenant", required=True)
+    ap.add_argument("--hosts-file", required=True, help="one host per line, written by `mandato instance up`")
     ap.add_argument("--listen", default="0.0.0.0:3128")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    reg = load_registry(a.tenant)
-    allow = {h for s, (c, _) in reg.connectors.items() if s in reg.enabled_sources for h in c.manifest["hosts"]}
+    with open(a.hosts_file, encoding="utf-8") as f:   # no module code runs in the gateway
+        allow = {h.strip().lower() for h in f if h.strip() and P.HOST_RE.match(h.strip().lower())}
     host, port = a.listen.rsplit(":", 1)
     srv = Server((host, int(port)), make_handler(allow))
     log.info("egress listening: hosts=%d", len(allow))

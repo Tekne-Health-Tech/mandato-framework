@@ -11,7 +11,12 @@ import pg8000.native
 def connect(database: str, user: str = "worker_c1") -> pg8000.native.Connection:
     host = os.environ.get("PGHOST", "localhost")
     port = int(os.environ.get("PGPORT", "5432"))
-    kw = {"user": user, "database": database, "password": os.environ.get("PGPASSWORD")}
+    password = os.environ.get("PGPASSWORD")
+    pw_file = os.environ.get("PGPASSWORD_FILE")   # containers: the role's password from a mounted secret
+    if pw_file:
+        with open(pw_file, encoding="utf-8") as f:
+            password = f.read().strip()
+    kw = {"user": user, "database": database, "password": password}
     if host.startswith("/"):
         kw["unix_sock"] = f"{host}/.s.PGSQL.{port}"
     else:

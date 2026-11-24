@@ -160,6 +160,7 @@ def main() -> None:
     print(json.dumps({"pools": reg.pools(), "queues": {p: reg.queues(p) for p in reg.pools()},
                       "enabled_sources": sorted(reg.enabled_sources), "missing_sources": reg.missing_sources,
                       "schedules": [s.identity for s in reg.schedules],
+                      "egress_hosts": sorted({h for s in reg.enabled_sources for h in reg.connectors[s][0].manifest["hosts"]}),
                       "secret_refs": sorted({c.manifest["auth_secret_ref"] for c, _ in reg.connectors.values()
                                              if c.manifest.get("auth") == "api_key"})}))
 
