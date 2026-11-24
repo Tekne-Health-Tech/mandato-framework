@@ -119,6 +119,23 @@ class RobotsTest(unittest.TestCase):
         self.assertEqual(e.exception.code, "robots_disallowed")
         self.assertEqual(sum(1 for s in net.sent if s[2] == "/robots.txt"), 1, "robots fetched once per run")
 
+    def test_disallow_rules_match_the_query_too(self):
+        net = Net({f"https://{HOST}/robots.txt": (200, {}, b"User-agent: *\nDisallow: /busca?privado=1\n")})
+        c = client(net)
+        c.get(f"https://{HOST}/busca", params={"q": "x"})
+        for url, params in ((f"https://{HOST}/busca?privado=1", None), (f"https://{HOST}/busca", {"privado": "1"})):
+            with self.assertRaises(P.FetchRefused) as e:
+                c.get(url, params=params)
+            self.assertEqual(e.exception.code, "robots_disallowed")
+        self.assertFalse(any("privado" in s[2] for s in net.sent))
+
+    def test_long_paths_are_matched_whole(self):
+        long = "/a" * 200
+        net = Net({f"https://{HOST}/robots.txt": (200, {}, f"User-agent: *\nDisallow: {long}/fim\n".encode())})
+        with self.assertRaises(P.FetchRefused) as e:
+            client(net).get(f"https://{HOST}{long}/fim")
+        self.assertEqual(e.exception.code, "robots_disallowed")
+
 
 class LimitsTest(unittest.TestCase):
     def test_body_cap(self):
@@ -149,10 +166,79 @@ class LimitsTest(unittest.TestCase):
         for i in range(len(stamps)):
             self.assertLessEqual(sum(1 for s in stamps if stamps[i] <= s < stamps[i] + 60), 3)
 
+    def test_rate_limit_holds_across_threads(self):
+        import threading
+        lock = threading.Lock(); t = [0.0]; stamps = []
+        def sleep(s):
+            with lock:
+                t[0] += s
+        b = P.TokenBucket(5, clock=lambda: t[0], sleep=sleep)
+        def take():
+            for _ in range(5):
+                b.take()
+                with lock:
+                    stamps.append(t[0])
+        ts = [threading.Thread(target=take) for _ in range(4)]
+        for th in ts: th.start()
+        for th in ts: th.join(10)
+        self.assertEqual(len(stamps), 20)
+        for s0 in stamps:
+            self.assertLessEqual(sum(1 for s in stamps if s0 <= s < s0 + 60), 5)
+
+    def test_lease_lost_during_the_rate_limit_wait_sends_nothing(self):
+        state = {"alive": True}
+        net = Net()
+        c = client(net, alive=lambda: state["alive"])
+        c.get(f"https://{HOST}/a")
+        sent = len(net.sent)
+        t = [0.0]
+        c.bucket.clock = lambda: t[0]
+        def sleep(s):
+            t[0] += s
+            state["alive"] = False
+        c.bucket.sleep = sleep
+        c.bucket.per_min = 1
+        with self.assertRaises(P.FetchRefused) as e:
+            c.get(f"https://{HOST}/b")
+        self.assertEqual(e.exception.code, "lease_lost")
+        self.assertEqual(len(net.sent), sent)
+
     def test_lost_lease_stops_requests(self):
         with self.assertRaises(P.FetchRefused) as e:
             client(Net(), alive=lambda: False).get(f"https://{HOST}/a")
         self.assertEqual(e.exception.code, "lease_lost")
+
+
+class DeadlineTest(unittest.TestCase):
+    """The per-request time budget is total, not per read (design 0003 §3.2)."""
+
+    def test_a_dripping_server_is_cut_at_the_deadline(self):
+        import http.client, socket, threading, time
+        from workers.core.fetch.client import http_get
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        stop = threading.Event()
+        def drip():
+            c, _ = srv.accept()
+            c.recv(4096)
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+            while not stop.is_set():
+                try:
+                    c.sendall(b"x")
+                except OSError:
+                    break
+                time.sleep(0.2)   # each read succeeds well inside the socket timeout
+            c.close()
+        th = threading.Thread(target=drip, daemon=True); th.start()
+        sock = socket.create_connection(srv.getsockname(), timeout=5)
+        conn = http.client.HTTPConnection("x")
+        t0 = time.monotonic()
+        try:
+            with self.assertRaises(P.FetchRefused) as e:
+                http_get(conn, sock, "x", "/", {}, 1.0, 10_000)
+        finally:
+            stop.set(); conn.close(); srv.close()
+        self.assertEqual(e.exception.code, "fetch_failed")
+        self.assertLess(time.monotonic() - t0, 3)
 
 
 if __name__ == "__main__":

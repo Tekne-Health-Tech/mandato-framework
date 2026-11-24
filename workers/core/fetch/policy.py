@@ -4,6 +4,7 @@ Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
 """
 import ipaddress
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlencode, urlsplit
@@ -106,16 +107,19 @@ class TokenBucket:
     clock: object = time.monotonic
     sleep: object = time.sleep
     _stamps: list[float] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def take(self) -> None:
-        """Blocks until one more request fits in any 60 s window."""
-        now = self.clock()
-        self._stamps = [t for t in self._stamps if now - t < 60]
-        if len(self._stamps) >= self.per_min:
-            self.sleep(60 - (now - self._stamps[0]))
-            now = self.clock()
-            self._stamps = [t for t in self._stamps if now - t < 60]
-        self._stamps.append(now)
+        """Blocks until one more request fits in any 60 s window. Callers queue on the lock, so concurrent requests
+        of one source (the fetch sidecar serves several jobs) never exceed the limit together."""
+        with self._lock:
+            while True:
+                now = self.clock()
+                self._stamps = [t for t in self._stamps if now - t < 60]
+                if len(self._stamps) < self.per_min:
+                    self._stamps.append(now)
+                    return
+                self.sleep(60 - (now - self._stamps[0]))
 
 
 @dataclass

@@ -117,14 +117,15 @@ def check_connector(connector: Any, module_short: str, params: dict | None) -> N
 
 
 def check_registry(entries: list[tuple[Any, str]]) -> None:
-    """Two snapshot connectors may not share a target table (design 0003 §4)."""
-    seen = {}
+    """A snapshot connector owns its target table alone: no other connector, snapshot or incremental, may write it,
+    because a snapshot run deletes every row it did not return (design 0003 §4)."""
+    by_table: dict[str, list[str]] = {}
     for c, _ in entries:
         m = c.manifest
-        if m.get("sync") == "snapshot":
-            if m["target_table"] in seen:
-                raise ConnectorRefused("invalid_manifest", "snapshot_table_shared")
-            seen[m["target_table"]] = m["source_id"]
+        by_table.setdefault(m["target_table"], []).append(m.get("sync"))
+    for syncs in by_table.values():
+        if len(syncs) > 1 and "snapshot" in syncs:
+            raise ConnectorRefused("invalid_manifest", "snapshot_table_shared")
 
 
 def check_records(records: list[dict], natural_key: list[str], deleted_column: str | None) -> list[dict]:

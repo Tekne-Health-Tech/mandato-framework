@@ -3,8 +3,8 @@
 Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
 """
 import hashlib
-import os
 import json
+import re
 import logging
 import threading
 from collections.abc import Callable
@@ -17,11 +17,21 @@ from workers.core.fetch.client import FetchClient, resolve, tls_transport
 
 from . import raw as R
 from .db import connect, tx
-from .loader import MAX_RECORDS, MAX_RESOURCES, ConnectorRefused, check_connector, check_records
+from .loader import CODE_RE, MAX_RECORDS, MAX_RESOURCES, ConnectorRefused, check_connector, check_records, check_registry
 from .upsert import delete_keys, delete_missing, table_columns, upsert_rows
 
 QUEUE = "core.connector_run"
 log = logging.getLogger("mandato.connectors")
+PATH_RE = re.compile(r"^[A-Za-z0-9_.\[\]]{1,120}$")
+
+
+def safe_issue(i) -> dict:
+    """A validation issue as it may be stored and logged: a code and a structural path, nothing a connector could
+    fill with record content (design 0003 §5.4)."""
+    code = i.get("code") if isinstance(i, dict) else None
+    path = i.get("path") if isinstance(i, dict) else None
+    return {"code": code if isinstance(code, str) and CODE_RE.match(code) else "invalid_issue",
+            "path": path if isinstance(path, str) and PATH_RE.match(path) else "?"}
 
 
 class CursorConflict(Exception):
@@ -104,6 +114,7 @@ def _run(deps: Deps, conn, hb: Heartbeat, token: str, job_id: str, payload: dict
         return _finish(conn, token, False, "unknown_source")
     connector, short = entry
     try:
+        check_registry(list(deps.registry.values()))
         check_connector(connector, short, tenant.get("params"))
         if connector.manifest["source_id"] != source_id:
             raise ConnectorRefused("invalid_manifest", "source_id")
@@ -158,15 +169,21 @@ def _fail(conn, token, run_id, code) -> str:
 def _collect_and_apply(deps, conn, hb, token, connector, source_id, tenant, run_id, cursor_before) -> str:
     m = connector.manifest
     recorder = R.Recorder(conn, deps.store, token, run_id, source_id)
-    if deps.http_factory is not None:   # the fetch sidecar (design 0004 §6); the worker still records under its lease
-        client = deps.http_factory(token, recorder)
-    else:
-        client = FetchClient(m, recorder, secret=deps.secret, resolver=deps.resolver, transport=deps.transport,
-                             bucket=deps.bucket(m["rate_limit_per_min"]), budget=deps.budget(), alive=lambda: not hb.lost.is_set())
-    ctx = Ctx(source_id, tenant.get("params") or {}, client)
     cursors = dict(cursor_before or {})
     records, issues = [], []
-    try:
+    try:   # the client is built inside: a missing secret fails this run (tx 3), it does not escape the runner
+        if deps.http_factory is not None:   # the fetch sidecar (design 0004 §6); the worker still records under its lease
+            client = deps.http_factory(token, recorder)
+        else:
+            try:
+                client = FetchClient(m, recorder, secret=deps.secret, resolver=deps.resolver, transport=deps.transport,
+                                     bucket=deps.bucket(m["rate_limit_per_min"]), budget=deps.budget(),
+                                     alive=lambda: not hb.lost.is_set())
+            except P.FetchRefused:
+                raise
+            except Exception:
+                raise P.FetchRefused("secret_unavailable") from None
+        ctx = Ctx(source_id, tenant.get("params") or {}, client)
         resources = connector.discover(ctx)
         if len(resources) > MAX_RESOURCES:
             raise P.FetchRefused("run_too_large")
@@ -177,7 +194,7 @@ def _collect_and_apply(deps, conn, hb, token, connector, source_id, tenant, run_
             recs = connector.normalize(batch)
             if len(records) + len(recs) > MAX_RECORDS:
                 raise P.FetchRefused("run_too_large")
-            issues += connector.validate(recs)["errors"]
+            issues += [safe_issue(i) for i in connector.validate(recs)["errors"]]
             records += recs
             cursors[res["id"]] = batch["cursor"]
         issues += check_records(records, m["natural_key"], m["deleted_column"])
@@ -211,7 +228,6 @@ def _collect_and_apply(deps, conn, hb, token, connector, source_id, tenant, run_
             log.warning("run failed: source=%s code=lease_lost", source_id)
             return "lease_lost"
         log.error("run failed: source=%s code=internal type=%s", source_id, type(e).__name__)
-        log.debug("internal detail", exc_info=os.environ.get("MANDATO_DEBUG") == "1")
         return _fail(conn, token, run_id, "internal")
     return stats["state"]
 

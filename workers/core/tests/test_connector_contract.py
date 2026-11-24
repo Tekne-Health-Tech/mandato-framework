@@ -55,6 +55,24 @@ class LoaderRefusesTest(unittest.TestCase):
         with self.assertRaises(ConnectorRefused):
             check_registry([(a, "hello"), (b, "hello")])
 
+    def test_a_snapshot_table_is_not_shared_with_an_incremental_connector(self):
+        a = variant()
+        b = variant(source_id="outra-fonte", sync="incremental", deleted_column="removido")
+        for pair in ([a, b], [b, a]):
+            with self.assertRaises(ConnectorRefused) as e:
+                check_registry([(c, "hello") for c in pair])
+            self.assertEqual(e.exception.code, "invalid_manifest")
+        c = variant(source_id="terceira", sync="incremental", deleted_column="removido")
+        check_registry([(b, "hello"), (c, "hello")])   # two incremental sources may share a table
+
+    def test_issues_are_reduced_to_codes_and_structural_paths(self):
+        from workers.core.connectors.runner import safe_issue
+        self.assertEqual(safe_issue({"code": "missing_field", "path": "records[3].nome"}),
+                         {"code": "missing_field", "path": "records[3].nome"})
+        leaky = safe_issue({"code": "Maria da Silva", "path": "records[0].nome=Maria da Silva\nsecret"})
+        self.assertEqual(leaky, {"code": "invalid_issue", "path": "?"})
+        self.assertEqual(safe_issue("texto"), {"code": "invalid_issue", "path": "?"})
+
 
 class SuiteCatchesBrokenConnectorsTest(unittest.TestCase):
     """Each broken connector must make at least one contract test fail."""

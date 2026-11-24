@@ -11,6 +11,7 @@ Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
 import argparse
 import json
 import re
+import secrets
 import sys
 
 from . import raw as R
@@ -32,8 +33,15 @@ def takedown(database: str, store: R.RawStore, manifest: dict, key: list, reason
     source_id, table = manifest["source_id"], manifest["target_table"]
     conn = connect(database, user)
     try:
-        conn.run("""insert into core.job (id, queue, data_class, payload) values (core.uuid7(), 'core.takedown', 'C1', '{}')""")
-        token = conn.run("select lease_token from core.claim_job(array['core.takedown'], 'takedown')")[0][0]
+        # A queue of its own (core.td_<random>): the claim can only return this invocation's job, never a pending
+        # takedown of another source, so the lease and the audit actor are exactly this command's (design 0003 §4).
+        queue = f"core.td_{secrets.token_hex(16)}"
+        job_id = conn.run("""insert into core.job (id, queue, data_class, payload) values (core.uuid7(), :q, 'C1', '{}')
+                             returning id""", q=queue)[0][0]
+        claimed = conn.run("select job_id, lease_token from core.claim_job(array[:q], 'takedown')", q=queue)
+        if not claimed or claimed[0][0] != job_id:
+            raise RuntimeError("takedown: own job not claimed")
+        token = claimed[0][1]
         h = key_sha256(key)
         with tx(conn, token) as c:
             if lift:

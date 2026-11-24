@@ -9,6 +9,8 @@ import hashlib
 import http.client
 import socket
 import ssl
+import threading
+from contextlib import contextmanager
 from collections.abc import Callable
 from urllib.parse import urljoin
 
@@ -25,27 +27,63 @@ def resolve(host: str) -> list[str]:
     return sorted({ai[4][0] for ai in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)})
 
 
-def tls_transport(ip: str, host: str, path_qs: str, headers: dict[str, str], timeout: float, max_body: int):
-    """Connects to the already validated `ip`; SNI, Host and certificate checks use `host`."""
-    ctx = ssl.create_default_context()
-    raw = socket.create_connection((ip, 443), timeout=timeout)
+@contextmanager
+def deadline(sock: socket.socket, seconds: float):
+    """A total deadline for one request: the socket timeout only bounds each read, so a server that sends one byte
+    just under it could hold the request forever. At the deadline the socket is shut down, which wakes any blocked
+    read; the request then fails as a timeout (design 0003 §3.2)."""
+    fired = threading.Event()
+
+    def cut():
+        fired.set()
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    t = threading.Timer(seconds, cut)
+    t.daemon = True
+    t.start()
     try:
-        sock = ctx.wrap_socket(raw, server_hostname=host)
-    except Exception:
-        raw.close()
+        yield
+    except (OSError, http.client.HTTPException, ssl.SSLError, ValueError):
+        if fired.is_set():
+            raise P.FetchRefused("fetch_failed", "deadline") from None
         raise
-    conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
+    finally:
+        t.cancel()
+    if fired.is_set():
+        raise P.FetchRefused("fetch_failed", "deadline")
+
+
+def http_get(conn: http.client.HTTPConnection, sock, host: str, path_qs: str, headers: dict[str, str], timeout: float,
+             max_body: int):
+    """One GET over an established socket, bounded in time (total) and size."""
     conn.sock = sock
-    try:
+    with deadline(sock, timeout):
         conn.request("GET", path_qs, headers={**headers, "Host": host, "Accept-Encoding": "identity"})
         r = conn.getresponse()
         length = r.getheader("Content-Length")
         if length is not None and length.isdigit() and int(length) > max_body:
             raise P.FetchRefused("fetch_refused", "body_too_large")
         body = r.read(max_body + 1)
-        if len(body) > max_body:
-            raise P.FetchRefused("fetch_refused", "body_too_large")
-        return r.status, {k.lower(): v for k, v in r.getheaders()}, body
+    if len(body) > max_body:
+        raise P.FetchRefused("fetch_refused", "body_too_large")
+    return r.status, {k.lower(): v for k, v in r.getheaders()}, body
+
+
+def tls_transport(ip: str, host: str, path_qs: str, headers: dict[str, str], timeout: float, max_body: int):
+    """Connects to the already validated `ip`; SNI, Host and certificate checks use `host`."""
+    ctx = ssl.create_default_context()
+    raw = socket.create_connection((ip, 443), timeout=timeout)
+    try:
+        with deadline(raw, timeout):
+            sock = ctx.wrap_socket(raw, server_hostname=host)
+    except Exception:
+        raw.close()
+        raise
+    conn = http.client.HTTPSConnection(host, 443, timeout=timeout, context=ctx)
+    try:
+        return http_get(conn, sock, host, path_qs, headers, timeout, max_body)
     finally:
         conn.close()
 
@@ -68,6 +106,8 @@ class FetchClient:
             raise P.FetchRefused("lease_lost")
         self.budget.request()
         self.bucket.take()
+        if not self.alive():   # the rate-limit wait can outlast the lease
+            raise P.FetchRefused("lease_lost")
         ip = None   # resolver None: the transport's gateway resolves and checks (fetch sidecar behind egress, design 0004 §3)
         if self.resolver is not None:
             try:
@@ -101,7 +141,7 @@ class FetchClient:
         base = {**headers, "User-Agent": P.USER_AGENT}
         for hop in range(P.MAX_REDIRECTS + 1):
             target = P.check_url(url, self.hosts, params if hop == 0 else None)
-            if robots and not self._robots(target.host).allowed(target.path):
+            if robots and not self._robots(target.host).allowed(target.path_qs):   # RFC 9309 matches path and query
                 raise P.FetchRefused("robots_disallowed")
             send = dict(base)
             if credential and hop == 0 and self.auth:

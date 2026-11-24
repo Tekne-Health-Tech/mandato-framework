@@ -38,7 +38,7 @@ class RunnerTest(unittest.TestCase):
         self.su.run("delete from core.data_source_run where source_id = 'exemplo-itens'")
         self.su.run("""insert into core.data_source (source_id, name, terms_url, cadence) values ('exemplo-itens','exemplo-itens','','0 6 * * *')
                        on conflict (source_id) do update set cursor = null, last_success_at = null""")
-        self.su.run("delete from core.job where queue in ('core.connector_run','core.takedown')")
+        self.su.run("delete from core.job where queue in ('core.connector_run','core.takedown') or queue like 'core.td\\_%'")
         self.su.run("set session_replication_role = origin")
         self.dir = tempfile.TemporaryDirectory()
         self.store = R.FsRawStore(self.dir.name)
@@ -285,6 +285,46 @@ class RunnerTest(unittest.TestCase):
         takedown(DB, self.store, ExemploItens.manifest, ["2"], "takedown", lift=True)
         self.go()
         self.assertEqual(self.q("select count(*) from mod_hello.exemplo_item where codigo = '2'")[0][0], 1)
+
+    def test_takedown_claims_only_its_own_job(self):
+        self.go()
+        w = self.connect(DB, "worker_c1")
+        try:   # a takedown of another source is pending, in the old shared queue and in a queue of its own
+            other = [w.run("insert into core.job (id, queue, data_class, payload) values (core.uuid7(), :q, 'C1', '{}') returning id::text",
+                           q=q)[0][0] for q in ("core.takedown", "core.td_" + "0" * 32)]
+        finally:
+            w.close()
+        takedown(DB, self.store, ExemploItens.manifest, ["1"], "takedown")
+        for j in other:
+            self.assertEqual(self.q("select state from core.job where id = cast(:j as uuid)", j=j)[0][0], "queued")
+        actor = self.q("""select actor_id from audit.event where action = 'takedown_takedown' order by id desc limit 1""")[0][0]
+        self.assertNotIn(actor, other)
+        self.assertEqual(self.q("select state from core.job where id = cast(:j as uuid)", j=actor)[0][0], "done")
+
+    def test_missing_secret_fails_the_run_instead_of_escaping(self):
+        c = ExemploItens()
+        c.manifest = {**ExemploItens.manifest, "auth": "api_key", "auth_secret_ref": "exemplo_key", "auth_header": "X-Api-Key"}
+        self.connector = c
+        def no_secret(ref):
+            raise KeyError(ref)
+        state, job = self.go(self.deps(secret=no_secret))
+        self.assertEqual(state, "queued")
+        self.assertEqual(self.q("select last_error from core.job where id = cast(:j as uuid)", j=job)[0][0], "secret_unavailable")
+        self.assertEqual(self.last_run()[:2], ("failed", "secret_unavailable"))
+
+    def test_snapshot_keeps_keys_stored_in_other_types(self):
+        from decimal import Decimal
+        from datetime import date
+        from workers.core.connectors.upsert import delete_missing, upsert_rows
+        self.q("drop table if exists mod_hello.nk_test")
+        self.q("create table mod_hello.nk_test (k numeric not null, d date not null, v text, primary key (k, d))")
+        self.addCleanup(lambda: self.connect(DB, os.environ.get("PGUSER", "postgres")).run("drop table if exists mod_hello.nk_test"))
+        rows = [{"k": Decimal("1.0"), "d": date(2026, 1, 2), "v": "a"}, {"k": Decimal("2.50"), "d": date(2026, 1, 3), "v": "b"},
+                {"k": Decimal("3"), "d": date(2026, 1, 4), "v": "c"}]
+        upsert_rows(self.su, "mod_hello.nk_test", rows, ["k", "d"])
+        keep = [(r["k"], r["d"]) for r in rows[:2]]
+        self.assertEqual(delete_missing(self.su, "mod_hello.nk_test", ["k", "d"], keep), 1)
+        self.assertEqual(sorted(str(r[0]) for r in self.q("select k from mod_hello.nk_test")), ["1.0", "2.50"])
 
     def test_incremental_removal_deletes_the_row(self):
         class Incr(ExemploItens):

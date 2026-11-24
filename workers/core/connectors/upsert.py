@@ -71,10 +71,16 @@ def delete_keys(conn, table: str, natural_key: list[str], keys: list[tuple]) -> 
 
 
 def delete_missing(conn, table: str, natural_key: list[str], keep: list[tuple]) -> int:
-    """Snapshot sync: delete every row whose natural key is not in `keep`."""
+    """Snapshot sync: delete every row whose natural key is not in `keep`.
+
+    The kept keys are cast to the table's own column types (`jsonb_populate_record`) and compared column by column,
+    so a key is matched the way the upsert stored it: numeric 1.0 sent as "1.0", dates as ISO text, and so on."""
     schema, _, name = table.partition(".")
     t = f"{_q(schema)}.{_q(name)}"
-    key_expr = "jsonb_build_array(" + ", ".join(f"t.{_q(c)}" for c in natural_key) + ")"
-    out = conn.run(f"delete from {t} as t where not exists (select 1 from jsonb_array_elements(cast(:a as jsonb)) k "
-                   f"where k = {key_expr}) returning 1", a=json.dumps([list(k) for k in keep], default=str))
+    match = " and ".join(f"k.{_q(c)} = t.{_q(c)}" for c in natural_key)
+    keys = [dict(zip(natural_key, k)) for k in keep]
+    out = conn.run(f"with k as materialized (select r.* from jsonb_array_elements(cast(:a as jsonb)) e, "
+                   f"lateral jsonb_populate_record(null::{t}, e) r) "
+                   f"delete from {t} as t where not exists (select 1 from k where {match}) returning 1",
+                   a=json.dumps(keys, default=str))
     return len(out)
