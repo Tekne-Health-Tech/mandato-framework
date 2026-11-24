@@ -99,3 +99,11 @@ hash change), but a later integrity re-check would fail. Store the filter result
   on the developer machine, not the app, but consistent with the no-tracker rule it should be set too.
 
 Verdict: **3 blockers (B1–B3)**, 8 non-blocking.
+
+## Disposition (coordinator, 2026-11-24)
+
+- B1–B3: fixed in the first fix round.
+- Promoted to must-fix and handled in the follow-up round: S1 (`min_app_version`), S3 and S4 (freshness, key,
+  alg, rollback and `min_generation_at_build` tests), S5 (typed sync errors, `openStore` failure caught).
+- Carried to E2.2: S2 (`keyring_update`), S6 (font and spacing tokens), S7 (single-row dataset), S8 (cached
+  bundle hash after takedown filtering).
