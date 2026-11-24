@@ -1,6 +1,6 @@
 # Design 0003 — Connector kit, runner and raw/normalized layers (E3.1)
 
-Status: **Draft (v3)** · 2026-11-24 · Builds on design 0001 (contract 0.1.1) and 0002. Owner: architecture backbone. v2 answers the Codex review `egm/0003/stage1-codex.md`; v3 answers the re-check `egm/0003/stage2-codex.md`. §12 maps each finding.
+Status: **Accepted (v4)** · 2026-11-24 · Builds on design 0001 (contract 0.1.1) and 0002. Owner: architecture backbone. v2 answers the Codex review `egm/0003/stage1-codex.md`; v3 answers the re-check `egm/0003/stage2-codex.md`; v4 closes the three items left open by the final check `egm/0003/stage3-codex.md` (stopping rule reached: the implementation review verifies them). §12 maps each finding.
 
 ## 1. Problem
 
@@ -91,7 +91,7 @@ The connector never receives a secret. `ConnectorContext` has no `secret()`. The
 - `RawStore` protocol: `put(sha256, data) -> storage_key`, `get(storage_key) -> bytes`, `delete(storage_key)`. Framework ships `FsRawStore` (dev, demo, tests). The object-storage store (private Supabase Storage bucket) belongs to the deployment lane.
 - **Recording is immediate and independent of the run's outcome.** For each accepted response the client (1) writes the blob, then (2) inserts one `core.raw_object` row in its own short lease-bound transaction. A `rejected`, `failed` or killed run keeps every row it recorded.
 - Crash between (1) and (2) leaves a blob with no row; never a row with no blob. Reconciliation: the prune step (below) deletes blobs older than 24 h that no row references.
-- **External deletes happen only after the database commit.** Prune and purge delete `raw_object` rows in a transaction, commit, and only then delete blobs whose `sha256` no row references any more. A crash or rollback before the commit deletes nothing; a crash after it leaves an orphan blob, which the 24 h orphan sweep removes. A blob is never deleted while a committed row points to it.
+- **External deletes happen only after the database commit, and blob writes and deletes are serialized per `sha256`.** Prune and takedown delete `raw_object` rows in a transaction and commit. Then, per candidate `sha256`, a short transaction takes `pg_advisory_xact_lock(hashtext('core.raw_object'), hashtext(sha256))`, re-checks that no row references it, deletes the blob while holding the lock, and commits. The writer (§4, step 2) takes the same lock in its row-insert transaction and, under it, checks the blob exists (writing it again if a deleter removed it) before inserting the row. So a committed row never points to a deleted blob. A crash after the row commit and before the blob delete leaves an orphan blob, which the 24 h orphan sweep removes under the same lock.
 - **Retention.** After a successful run (after tx 2 commits), the runner deletes this source's `raw_object` rows older than `raw_retention_days` (tx 4), then the unreferenced blobs. Deletes are audited by the row trigger.
 - **Takedown** (a record published by mistake, a removal request): `python -m workers.core.connectors.takedown --source <id> --key <natural key as JSON> --reason <takedown|error|legal>`, run by the operator as `worker_c1` with a lease of its own job (`core.takedown`). In one transaction it:
   1. deletes the normalized row with that natural key from the source's `target_table`;
@@ -100,7 +100,7 @@ The connector never receives a secret. `ConnectorContext` has no `secret()`. The
   4. writes `audit.write('takedown_<reason>', '<target_table>', null, {"count": n})`. The reason travels as a registered audit **action** term (`takedown_takedown`, `takedown_error`, `takedown_legal`, registered by `0004`), so `audit.details_ok` stays unchanged.
 
   Then, after commit, unreferenced blobs are deleted. Lifting a suppression is a separate audited command (`--lift`).
-- **Records removed upstream.** For `sync: snapshot` sources, tx 2 also deletes rows of `target_table` whose natural key is not in the run's record set (counted as `deleted`). A snapshot table must be written by one source only; the loader refuses two snapshot connectors with the same `target_table`. For `sync: incremental` sources the source must expose removals (a status field or a tombstone list) and the connector maps them to a `deleted` flag column; the contract suite requires `incremental` connectors to declare `deleted_column` in the manifest.
+- **Records removed upstream.** For `sync: snapshot` sources, tx 2 also deletes rows of `target_table` whose natural key is not in the run's record set (counted as `deleted`). A snapshot table must be written by one source only; the loader refuses two snapshot connectors with the same `target_table`. For `sync: incremental` sources the source must expose removals (a status field or a tombstone list); the connector emits those records with `deleted_column = true`, and the runner **deletes** the row with that natural key instead of upserting it (counted as `deleted`). `deleted_column` is a field of the emitted records, not a stored flag: no removed record stays in `target_table`. The contract suite requires `incremental` connectors to declare `deleted_column` in the manifest.
 
 ## 5. Runner
 
@@ -117,7 +117,7 @@ The connector never receives a secret. `ConnectorContext` has no `secret()`. The
 7. **After commit:** retention prune (§4, tx 4 then blobs). A prune failure is logged with its code and leaves the run `ok`.
 8. **Release** the advisory lock, stop the heartbeat thread, close the connections.
 
-The whole run is held in memory, so the run has its own limits: at most `max_run_bytes` of accepted response bodies (default 200 MiB) and at most 10 000 requests. The client counts both per run and refuses the next request with `run_too_large` once either is reached; the run then fails with that code. A source that needs more is split into resources across several runs or gets streaming later.
+The whole run is held in memory, so the run has its own limits: at most `max_run_bytes` of accepted response bodies (default 200 MiB), at most 10 000 requests, at most 1 000 resources from `discover`, and at most 200 000 normalized records in total. The client counts bytes and requests and refuses the next request; the runner checks the resource count right after `discover` and the record count after each `normalize`. Reaching any limit raises `run_too_large`; the run then fails with that code. A source that needs more is split into resources across several runs or gets streaming later.
 
 ## 6. Database changes (`0004_core.sql`, applied by bootstrap)
 
@@ -181,7 +181,9 @@ A module table named in `target_table` must: live in the module schema, be owned
 - **Runner (Postgres, run.sh):** ok run writes stats, cursor, `last_success_at`, job `done`, all in one commit; validation failure → `rejected`, cursor and data unchanged, job requeued; exception in the upsert → `failed`, nothing partially written; two concurrent runs of one source → one `source_busy` and, with the advisory lock bypassed, the CAS makes one `cursor_conflict` and the cursor never goes backwards; second run with the stored cursor is incremental; unknown source, `data_class C2`, `oauth`, non-strict `params_schema` refused before any write; unprovisioned source → `source_not_provisioned`.
 - **Takedown and removals:** takedown deletes the normalized row, writes the suppression and the audit action, and the next run does not bring the record back (`suppressed = 1`); a snapshot run deletes a record missing upstream; an incremental connector without `deleted_column` is refused; two snapshot connectors on one table refused; audit `details_ok` unchanged.
 - **External deletes:** a failure after the prune delete statement and before commit leaves rows and blobs intact; a crash after commit leaves only an orphan blob, removed by the sweep.
-- **Heartbeat and size:** a fetch that sleeps 12 minutes under a fake clock keeps the lease (heartbeats continue) and `reclaim_jobs` does not touch it; a lost lease aborts the run with `lease_lost` before tx 2; the request after `max_run_bytes` or the 10 001st request is refused with `run_too_large`.
+- **Heartbeat and size:** a fetch that sleeps 12 minutes under a fake clock keeps the lease (heartbeats continue) and `reclaim_jobs` does not touch it; a lost lease aborts the run with `lease_lost` before tx 2; the request after `max_run_bytes`, the 10 001st request, a `discover` returning 1 001 resources and a `normalize` pushing the total over 200 000 records each fail the run with `run_too_large`.
+- **Raw race:** a deleter and a writer of the same `sha256` interleaved at every step (two connections, explicit ordering) never leave a committed row without its blob.
+- **Incremental removal:** a record emitted with `deleted_column = true` deletes the stored row and is not inserted.
 - **Crash points:** kill after tx 1 → `reclaim_jobs` marks run `failed` / `lease_expired` and requeues the job; kill after tx 2 → nothing to recover (run and job terminal together).
 - **Job functions:** `finish_job` and `heartbeat_job` refuse a wrong pool, a used token, an error with spaces; backoff and `dead` after `max_attempts`.
 - **Contract suite** passes on a reference test connector (`workers/core/tests/fixtures/`) and fails on a negative connector for each rule of §8.
@@ -196,7 +198,7 @@ A module table named in `target_table` must: live in the module schema, be owned
 
 ## 11. Out of scope
 
-Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3.4); scheduler and worker main loop (E0.7); the object-storage `RawStore`; takedown in module-owned normalized tables; real connectors (E3.2). **Backbone note for E3.2:** the federal legislative radar needs Câmara dos Deputados and Senado open-data connectors (proposições, tramitação, votações), which are not in E3.2's current list (IBGE, Transferegov, DOU). Proposed addition, to be recorded in the mandato-pro backlog.
+Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3.4); scheduler and worker main loop (E0.7); the object-storage `RawStore`; real connectors (E3.2). **Backbone note for E3.2:** the federal legislative radar needs Câmara dos Deputados and Senado open-data connectors (proposições, tramitação, votações), which are not in E3.2's current list (IBGE, Transferegov, DOU). Proposed addition, to be recorded in the mandato-pro backlog.
 
 ## 12. Review findings (Codex, stage 1) and where they are answered
 
@@ -224,4 +226,14 @@ Fetch sidecar packaging and network test 9 (deployment lane; release gate in §3
 | 9 | Purge reason rejected by `audit.details_ok` | §4/§6.3a reason carried as a registered action term; `details_ok` unchanged |
 | N1 | Blob deleted inside a transaction that may roll back | §4: blobs deleted only after commit, orphans swept |
 | N2 | Run memory unbounded | §5: `max_run_bytes` (200 MiB) and 10 000 requests per run, `run_too_large` |
+
+### Final check (Codex, stage 3): 3 open, closed by the author in v4
+
+| # | Finding | Answer |
+| --- | --- | --- |
+| 7 | §11 excluded takedown in module tables; incremental removal only flagged rows | §11 exclusion removed (takedown in §4 covers `target_table`); incremental removals now delete the row |
+| N1 | Prune vs writer race on the same `sha256` | §4: per-`sha256` advisory lock around blob delete and row insert; writer re-puts a missing blob; race test in §9 |
+| N2 | Resources and records unbounded | §5: 1 000 resources, 200 000 records per run, `run_too_large`; tests in §9 |
+
+Per the stopping rule (about three review rounds), these three are verified in the implementation's code review instead of a fourth design round.
 
