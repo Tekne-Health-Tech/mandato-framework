@@ -1,24 +1,21 @@
 import { createContext, type PropsWithChildren, useContext, useEffect, useState } from 'react';
 
 import { openStore, syncStore } from './sync/sqlite';
-import type { LocalSnapshot } from './sync';
+import { emptySnapshot, initializeStore, type StoreState } from './store-state';
 import { recordsFor, tenant } from './tenant';
 
-const empty: LocalSnapshot = { generation: 0, bundles: {} };
-const StoreContext = createContext(empty);
+const StoreContext = createContext<StoreState>({ snapshot: emptySnapshot, sync: { status: 'idle' } });
 
 export function StoreProvider({ children }: PropsWithChildren) {
-  const [snapshot, setSnapshot] = useState(empty);
+  const [state, setState] = useState<StoreState>({ snapshot: emptySnapshot, sync: { status: 'idle' } });
   useEffect(() => {
     let active = true;
-    void openStore().then(async (store) => {
-      if (active) setSnapshot(await store.read());
-      await syncStore(tenant.publishBaseUrl, store);
-      if (active) setSnapshot(await store.read());
-    });
+    void initializeStore(openStore, (store) => syncStore(tenant.publishBaseUrl, store))
+      .then((next) => { if (active) setState(next); });
     return () => { active = false; };
   }, []);
-  return <StoreContext.Provider value={snapshot}>{children}</StoreContext.Provider>;
+  return <StoreContext.Provider value={state}>{children}</StoreContext.Provider>;
 }
 
-export const useRecords = (projection: string) => recordsFor(useContext(StoreContext), projection);
+export const useRecords = (projection: string) => recordsFor(useContext(StoreContext).snapshot, projection);
+export const useSyncState = () => useContext(StoreContext).sync;

@@ -3,7 +3,7 @@ import { openDatabaseAsync } from 'expo-sqlite';
 
 import { syncPublished, type LocalSnapshot, type SyncStore } from './index';
 import { verifyManifest } from './verify';
-import { tenant } from '../tenant';
+import { appVersion, tenant } from '../tenant';
 
 const empty: LocalSnapshot = { generation: 0, bundles: {} };
 
@@ -33,4 +33,5 @@ export const syncStore = (baseUrl: string, store: SyncStore) => syncPublished({
   sha256: (body) => Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, body),
   verify: (manifest) => verifyManifest(manifest, tenant.publishKeys),
   minGenerationAtBuild: tenant.minGenerationAtBuild,
+  appVersion,
 });

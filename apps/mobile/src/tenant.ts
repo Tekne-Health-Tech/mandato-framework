@@ -21,6 +21,7 @@ interface TenantRuntime {
 }
 
 export const tenant = Constants.expoConfig?.extra?.tenant as TenantRuntime;
+export const appVersion = Constants.expoConfig?.version ?? '0.0.0';
 
 export const recordsFor = (snapshot: LocalSnapshot, projection: string) => Object.values(snapshot.bundles)
   .filter((bundle) => bundle.projection === projection)

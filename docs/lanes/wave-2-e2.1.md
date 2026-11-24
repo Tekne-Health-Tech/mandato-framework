@@ -16,6 +16,20 @@
 - Publication URLs require HTTPS. Development alone may use HTTP for `localhost` or `127.0.0.1`; release builds fail when `MANDATO_PUBLISH_BASE_URL` is missing.
 - Expo upgraded to stable SDK 58.0.23, newest stable npm release at least 14 days old on 2026-11-24. SDK-managed packages use exact versions from `expo@58.0.23`'s `bundledNativeModules.json`.
 
+## Follow-up round
+
+- Manifest verification tests now guard expiry, unknown `key_id` and wrong `alg`; sync tests guard rollback, the build generation floor and refused verification while retaining last-good data. Each guard was mutation-tested and observed failing when removed.
+- `min_app_version` is checked after takedowns. Unsupported builds retain remaining cached data and expose `update-required`, shown as a pt-BR update message.
+- Sync returns typed success or failure states with reason codes and no record data. Store initialization catches `openStore` failures and exposes `failed:store-open` instead of rejecting unhandled.
+
+Follow-up tests:
+
+- expired, unknown-key and wrong-algorithm manifests are refused;
+- lower generations are ignored and `min_generation_at_build` is enforced;
+- refused verification preserves old data;
+- `min_app_version` applies takedowns, skips bundles and exposes the update-required pt-BR UI state;
+- bundle hash, bundle fetch, invalid manifest, network and store-open failures return tested reason codes.
+
 ## Exact versions
 
 All versions are exact. Registry publication dates are UTC and precede implementation date (2026-11-24) by more than two weeks.
@@ -61,7 +75,7 @@ All versions are exact. Registry publication dates are UTC and precede implement
 | Full-snapshot tombstone removes absent record | PASS |
 | Generated mobile theme equals `native.js` output | PASS |
 | `pnpm install --frozen-lockfile` | PASS |
-| `pnpm test` | PASS — 109 tests |
+| `pnpm test` | PASS — 118 tests |
 | `npx tsc -p .` | PASS |
 | `pnpm --dir apps/mobile typecheck` | PASS |
 | `EXPO_NO_TELEMETRY=1 npx expo export --platform web` from `apps/mobile` | PASS — 12 static routes |
