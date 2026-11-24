@@ -1,5 +1,6 @@
 """Image gate (design 0004 §7): every Dockerfile FROM is digest-pinned and listed in infra/images/lock.json, and every
-lock entry was at least 14 days old when it was added. Exit 1 with one line per problem.
+lock entry was at least 14 days old when it was added; every GitHub Action is pinned by commit SHA and every
+workflow service image by digest. Exit 1 with one line per problem.
 
 Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
 """
@@ -12,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FROM = re.compile(r"^\s*FROM\s+(\S+)(?:\s+AS\s+\S+)?\s*$", re.I | re.M)
 MIN_AGE_DAYS = 14
+USES = re.compile(r"^\s*(?:-\s*)?uses:\s*(\S+)")
+IMAGE = re.compile(r"^\s*image:\s*(\S+)")
 
 
 def problems() -> list[str]:
@@ -30,6 +33,14 @@ def problems() -> list[str]:
                 out.append(f"{df.relative_to(ROOT)}: FROM {ref} is not digest-pinned")
             elif ref not in by_ref:
                 out.append(f"{df.relative_to(ROOT)}: FROM {ref} is not in infra/images/lock.json")
+    for wf in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for n, line in enumerate(wf.read_text().splitlines(), 1):
+            m = USES.match(line)
+            if m and not m.group(1).startswith("./") and not re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", m.group(1)):
+                out.append(f"{wf.relative_to(ROOT)}:{n}: action {m.group(1)} is not pinned by commit SHA")
+            m = IMAGE.match(line)
+            if m and "@sha256:" not in m.group(1):
+                out.append(f"{wf.relative_to(ROOT)}:{n}: image {m.group(1)} is not digest-pinned")
     return out
 
 

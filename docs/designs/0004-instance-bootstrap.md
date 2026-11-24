@@ -170,3 +170,15 @@ Non-blocking: the 60-minute cap's skipped runs are logged (§5.3) for alerting i
 ## 12. Out of scope
 
 Production deployment, DNS, ingress and TLS certificates for public endpoints, the API's outbound calls to Supabase Auth on staging, backups and monitoring (E7.1), AI provider sidecars (E4.1), the object-storage raw store (deployment of staging, after L3).
+
+## 13. Implementation notes (E0.7, 2026-11-24)
+
+Where the code differs from the text above, or where the text is not yet met. Nothing here relaxes a constraint of §2.
+
+- **What is verified:** `packages/db/test/run.sh` (roles `scheduler` and `fetch_c1`, `core.fetch_grant` with held, forged, malformed, stale and non-connector leases, `worker_c1` refused) and `test_runtime_pg` (worker loop and scheduler against Postgres); `test_cron`; `test_sidecar_egress` (sidecar refusals, per-job budgets, header allow-list, socket round trip, `egress` allow-list and address checks on the wire, `dbgw` fixed destination); `infra/compose/test-network.sh` in the **local** shape, including one connector run worker → sidecar → `egress` → origin → table; `instance up --env local` twice with an unchanged schema, data, keys, migration log and role passwords.
+- **API not in the generated compose.** The API needs outbound access to the auth provider's JWKS, which needs its own egress rule (staging). Until then the API runs outside the instance compose, and §9 items 1 and 4 are checked for workers and the scheduler only.
+- **Staging is not exercised.** `instance up` refuses any env other than `local`. The staging preflight, `dbgw` in compose and the staging-equivalent shape of §9 (item 5) wait for Tekne's infrastructure accounts (decision L3: Tekne holds and operates them, with guaranteed handover). `dbgw` itself is unit-tested.
+- **Network test, item 3:** the stale, missing and non-connector leases are tested at the database (`run.sh`); the network test sends a forged lease end to end.
+- **`instance register`** runs inside the tools image; local `validate` is not `--strict` (the demo tenant has no staging secrets).
+- **CI:** job `images` (`scripts/check_images.py` also refuses an action not pinned by commit SHA and a workflow service image without a digest; builds both images; checks non-root users) and job `network` (builds the images, runs the network test). The database job's Postgres service uses the locked digest.
+- **Not yet done:** SBOM (`syft`) and vulnerability scan (`grype`) with `infra/images/vuln-exceptions.yaml`. Image publication waits on the AGENTS.md licence-scope amendment (§7).
