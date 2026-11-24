@@ -48,6 +48,7 @@
 | api_rt | core.staff_invitation | SELECT |
 | api_rt | core.staff_keys() | EXECUTE |
 | api_rt | core.uuid7() | EXECUTE |
+| fetch_c1 | core.fetch_grant(p_lease text) | EXECUTE |
 | migrator | audit.bind_migration(p_module_id text, p_migration_id text) | EXECUTE |
 | migrator | audit.migration_log | SELECT |
 | migrator | audit.record_migration(p_module_id text, p_migration_id text, p_sha256 text) | EXECUTE |
@@ -59,8 +60,23 @@
 | migrator | core.data_source (name) | INSERT |
 | migrator | core.data_source (source_id) | INSERT, SELECT |
 | migrator | core.data_source (terms_url) | INSERT |
+| migrator | core.instance | SELECT |
+| migrator | core.instance (config_version) | INSERT, UPDATE |
+| migrator | core.instance (display_name) | INSERT, UPDATE |
+| migrator | core.instance (env) | INSERT, UPDATE |
+| migrator | core.instance (framework_version) | INSERT, UPDATE |
+| migrator | core.instance (house_acronym) | INSERT |
+| migrator | core.instance (slug) | INSERT |
+| migrator | core.instance (uf) | INSERT |
 | migrator | core.staff_keys() | EXECUTE |
 | migrator | core.uuid7() | EXECUTE |
+| scheduler | core.job (data_class) | INSERT |
+| scheduler | core.job (id) | INSERT |
+| scheduler | core.job (idempotency_key) | INSERT, SELECT |
+| scheduler | core.job (payload) | INSERT |
+| scheduler | core.job (queue) | INSERT, SELECT |
+| scheduler | core.job (run_after) | INSERT, SELECT |
+| scheduler | core.uuid7() | EXECUTE |
 | worker_c1 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c1 | audit.pool_classes(p_role name) | EXECUTE |
 | worker_c1 | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |

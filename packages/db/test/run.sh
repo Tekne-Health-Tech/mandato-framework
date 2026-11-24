@@ -323,6 +323,42 @@ fails "worker_c1 cannot insert a data_source" as worker_c1 '{}' "insert into cor
 equals "raw_object and suppression are forced-RLS, C1 and audited" "2|2|2" sup "select count(*) filter (where relforcerowsecurity), count(*) filter (where obj_description(c.oid,'pg_class')='class=C1'), (select count(*) from pg_trigger t where t.tgrelid in ('core.raw_object'::regclass,'core.suppression'::regclass) and t.tgname='audit') from pg_class c where c.oid in ('core.raw_object'::regclass,'core.suppression'::regclass)"
 equals "tenant connectors are provisioned by migrate" "ibge-municipios|0 6 1 * *" sup "select source_id||'|'||cadence from core.data_source"
 
+echo "# instance runtime roles (design 0004 §5.4, §6, §8)"
+equals "scheduler and fetch_c1 are hardened login roles without memberships" "2|0" sup "select count(*) filter (where rolcanlogin and not (rolsuper or rolbypassrls or rolcreaterole or rolcreatedb or rolinherit)), (select count(*) from pg_auth_members am join pg_roles m on m.oid=am.member where m.rolname in ('scheduler','fetch_c1')) from pg_roles where rolname in ('scheduler','fetch_c1')"
+SCHED_INS="insert into core.job (id, queue, data_class, idempotency_key, payload, run_after) values (core.uuid7(), 'core.connector_run', 'C1', 'sched:conn:ibge-municipios:2026-11-24T09:00Z', '{\"source_id\":\"ibge-municipios\"}', '2026-11-24T09:00Z') on conflict (queue, idempotency_key) do nothing"
+ok "scheduler enqueues a sched: job" as scheduler '{}' "$SCHED_INS"
+ok "a second scheduler insert of the same minute is a no-op" as scheduler '{}' "$SCHED_INS"
+equals "the minute is enqueued once" 1 sup "select count(*) from core.job where idempotency_key = 'sched:conn:ibge-municipios:2026-11-24T09:00Z'"
+equals "scheduler reads its own last minute" "2026-11-24 09:00:00+00" as scheduler '{}' "set local timezone = 'UTC'; select max(run_after) from core.job where queue = 'core.connector_run' and left(idempotency_key, 30) = 'sched:conn:ibge-municipios:202'"
+fails "scheduler cannot enqueue a non-sched job" as scheduler '{}' "insert into core.job (id, queue, data_class, idempotency_key) values (core.uuid7(), 'core.connector_run', 'C1', 'manual:1')"
+fails "scheduler cannot enqueue a running job" as scheduler '{}' "insert into core.job (id, queue, data_class, idempotency_key, state) values (core.uuid7(), 'core.connector_run', 'C1', 'sched:x:1', 'running')"
+equals "scheduler sees no non-sched job" 0 as scheduler '{}' "select count(*) from core.job where left(coalesce(idempotency_key, ''), 6) <> 'sched:'"
+fails "scheduler cannot read the job payload" as scheduler '{}' "select payload from core.job"
+fails "scheduler cannot claim" as scheduler '{}' "select * from core.claim_job(array['core.connector_run'], 's')"
+fails "scheduler cannot read C1 tables" as scheduler '{}' "select count(*) from core.data_source"
+sup "update core.job set state = 'done', lease_hash = null where state in ('queued','running')" >/dev/null
+JF=00000000-0000-7000-8000-00000000f001; JN=00000000-0000-7000-8000-00000000f002
+sup "set session_replication_role = replica; insert into core.job (id, queue, data_class, payload) values ('$JF','core.connector_run','C1','{\"source_id\":\"ibge-municipios\"}')" >/dev/null
+TF=$(claim)
+equals "fetch_grant derives the source from the held lease" "$JF|ibge-municipios" as fetch_c1 '{}' "select job_id||'|'||source_id from core.fetch_grant('$TF')"
+fails "fetch_grant refuses a forged lease" as fetch_c1 '{}' "select * from core.fetch_grant(repeat('ab',32))"
+fails "fetch_grant refuses a malformed lease" as fetch_c1 '{}' "select * from core.fetch_grant('x')"
+fails "worker_c1 cannot call fetch_grant" as worker_c1 '{}' "select * from core.fetch_grant('$TF')"
+sup "update core.job set locked_at = now() - interval '11 minutes' where id = '$JF'" >/dev/null
+fails "fetch_grant refuses a stale lease" as fetch_c1 '{}' "select * from core.fetch_grant('$TF')"
+sup "update core.job set state = 'done', lease_hash = null where id = '$JF'" >/dev/null
+sup "set session_replication_role = replica; insert into core.job (id, queue, data_class, payload) values ('$JN','hello.greet','C1','{\"source_id\":\"ibge-municipios\"}')" >/dev/null
+TN=$($PSQL -U worker_c1 -d "$DB" -c "select lease_token from core.claim_job(array['hello.greet'],'w1')" | tail -1)
+fails "fetch_grant refuses the lease of a non-connector job" as fetch_c1 '{}' "select * from core.fetch_grant('$TN')"
+sup "update core.job set state = 'done', lease_hash = null where id = '$JN'" >/dev/null
+fails "fetch_c1 reads no table" as fetch_c1 '{}' "select count(*) from core.job"
+REG="import('$ROOT/packages/db/src/migrate.js').then(m => console.log(m.registerInstance(process.argv[1], '$ROOT/tenants/demo', process.argv[2])))"
+equals "instance up sets env on an instance registered before 0005" updated node -e "$REG" "$DB" local
+equals "a second registration changes nothing" unchanged node -e "$REG" "$DB" local
+fails "registration as another env is refused" node -e "$REG" "$DB" staging
+fails "env is fixed once set, even for migrator under a lease" as migrator '{}' "select audit.bind_migration('core','instance'); update core.instance set env = 'staging'"
+equals "the instance row carries env local" local sup "select env from core.instance"
+
 echo "# API against Postgres (design 0002 §9, test 5 and 7): operator CLI, hook, activation, staff, audit"
 ok "core-api end to end (packages/core-api/test/api-pg.test.js)" bash -c "cd $ROOT && TEST_DB=$DB node --test packages/core-api/test/api-pg.test.js 2>&1"
 psql -X -q -U postgres -d postgres -c "drop database if exists ${DB}_api" >/dev/null

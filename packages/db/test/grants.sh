@@ -7,7 +7,7 @@ echo
 echo "| Role | Object | Privileges |"
 echo "| --- | --- | --- |"
 psql -X -At -U postgres -d "$DB" -F '|' -c "
-with roles(r) as (values ('api_rt'),('worker_c1'),('worker_c2'),('worker_c3'),('migrator'),('anon'),('authenticated')),
+with roles(r) as (values ('api_rt'),('worker_c1'),('worker_c2'),('worker_c3'),('migrator'),('scheduler'),('fetch_c1'),('anon'),('authenticated')),
 t as (
   select grantee r, table_schema||'.'||table_name obj, string_agg(privilege_type, ', ' order by privilege_type) p
     from information_schema.role_table_grants
