@@ -14,5 +14,11 @@
     "ajv-formats": "3.0.1",
     "typescript": "5.6.3",
     "yaml": "2.9.1"
+  },
+  "dependencies": {
+    "jose": "6.2.15",
+    "libsodium-wrappers": "0.7.15",
+    "pg": "8.22.0",
+    "standardwebhooks": "1.1.1"
   }
 }
