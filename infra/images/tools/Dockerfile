@@ -10,6 +10,14 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     corepack enable && pnpm install --frozen-lockfile --ignore-scripts
 
 FROM postgres:16.15-trixie@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+# Debian security fixes the pinned base predates (design 0004 §7, CI job supply-chain): exact versions, signed by
+# Debian, applied until the base image is rebuilt upstream and re-locked. Remove a line once the base carries it.
+RUN --mount=type=secret,id=extra_ca,required=false \
+    if [ -f /run/secrets/extra_ca ]; then echo 'Acquire::https::CaInfo "/run/secrets/extra_ca";' > /etc/apt/apt.conf.d/99extra-ca; fi; \
+    apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libc6=2.41-12+deb13u5 libc-bin=2.41-12+deb13u5 zlib1g=1:1.3.dfsg+really1.3.1-1+deb13u1 \
+ && rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99extra-ca
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 COPY --from=node /app /app
