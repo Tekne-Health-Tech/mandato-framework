@@ -138,5 +138,17 @@ export function migrate(db, tenantDir, migrator = 'migrator') {
       commit;`);
     done.push(key);
   }
+  provisionSources(db, tenantDir, migrator);
   return done;
+}
+
+// Design 0003 §6.1: one core.data_source row per tenant.yaml connector. name and terms_url are placeholders that the
+// connector runner replaces from the manifest on the first run; existing rows are never changed here.
+function provisionSources(db, tenantDir, migrator) {
+  const { config } = loadTenant(tenantDir);
+  const rows = (config.connectors ?? []).map((c) => `(${lit(c.source_id)}, ${lit(c.source_id)}, '', ${lit(c.schedule)})`);
+  if (!rows.length) return;
+  psql(db, migrator, `begin; select audit.bind_migration('core', 'sources');
+    insert into core.data_source (source_id, name, terms_url, cadence) values ${rows.join(', ')} on conflict (source_id) do nothing;
+    commit;`);
 }

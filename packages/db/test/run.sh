@@ -285,6 +285,44 @@ ok "migrate then applies the module migrations" bash -c "$MANDATO migrate $ROOT/
 equals "a second bootstrap and migrate change nothing" "migrate: up to date" bash -c "$MANDATO bootstrap $ROOT/tenants/demo $UPG >/dev/null && $MANDATO migrate $ROOT/tenants/demo $UPG"
 psql -X -q -U postgres -d postgres -c "drop database if exists $UPG" >/dev/null
 
+echo "# job completion and recovery (design 0003 §6.3)"
+enq() { sup "set session_replication_role = replica; insert into core.job (id, queue, data_class, payload, max_attempts) values ('$1','core.connector_run','C1','{}',${2:-5})" >/dev/null; }
+claim() { $PSQL -U worker_c1 -d "$DB" -c "select lease_token from core.claim_job(array['core.connector_run'],'w1')" | tail -1; }
+J1=00000000-0000-7000-8000-00000000e001; J2=00000000-0000-7000-8000-00000000e002; J3=00000000-0000-7000-8000-00000000e003; J4=00000000-0000-7000-8000-00000000e004
+enq $J1; T1=$(claim)
+fails "finish_job refuses free-text errors" as worker_c1 '{}' "select core.finish_job('$T1', false, 'Something broke for Maria')"
+fails "finish_job refuses an ok job with an error" as worker_c1 '{}' "select core.finish_job('$T1', true, 'x')"
+fails "finish_job refuses another pool" as worker_c2 '{}' "select core.finish_job('$T1', true, null)"
+fails "finish_job refuses a forged token" as worker_c1 '{}' "select core.finish_job(repeat('cd',32), true, null)"
+sup "update core.job set locked_at = now() - interval '1 hour' where id = '$J1'" >/dev/null
+ok "heartbeat_job refreshes the lease" as worker_c1 '{}' "select core.heartbeat_job('$T1')"
+equals "heartbeat moved locked_at forward" t sup "select locked_at > now() - interval '1 minute' from core.job where id = '$J1'"
+equals "finish_job ok -> done" done as worker_c1 '{}' "select core.finish_job('$T1', true, null)"
+fails "a finished lease cannot be used again" as worker_c1 '{}' "select core.finish_job('$T1', true, null)"
+fails "nor bound for audit" as worker_c1 '{}' "select audit.bind_lease('$T1')"
+enq $J2; T2=$(claim)
+equals "a failure requeues with backoff" queued as worker_c1 '{}' "select core.finish_job('$T2', false, 'fetch_failed')"
+equals "backoff is in the future and the lease is cleared" "t|t" sup "select run_after > now() + interval '1 minute', lease_hash is null and locked_by is null from core.job where id = '$J2'"
+enq $J3 1; T3=$(claim)
+equals "out of attempts -> dead" dead as worker_c1 '{}' "select core.finish_job('$T3', false, 'fetch_failed')"
+enq $J4; T4=$(claim)
+equals "a load-time code is dead at once" dead as worker_c1 '{}' "select core.finish_job('$T4', false, 'unknown_source')"
+sup "update core.job set state='queued', run_after=now(), last_error=null where id='$J2'" >/dev/null; T2=$(claim)
+fails "reclaim_jobs refuses a threshold under 2 minutes" as worker_c1 '{}' "select core.reclaim_jobs('30 seconds')"
+equals "a fresh lease is not reclaimed" 0 as worker_c1 '{}' "select core.reclaim_jobs()"
+sup "update core.job set locked_at = now() - interval '20 minutes' where id = '$J2'" >/dev/null
+equals "worker_c2 does not reclaim C1 jobs" 0 bash -c "$PSQL -U worker_c2 -d $DB -c 'select core.reclaim_jobs()'"
+equals "a stale C1 lease is reclaimed by worker_c1" 1 as worker_c1 '{}' "select core.reclaim_jobs()"
+equals "the reclaimed job is queued with lease_expired" "queued|lease_expired|true" sup "select state||'|'||last_error||'|'||(lease_hash is null) from core.job where id = '$J2'"
+fails "the reclaimed token is dead" as worker_c1 '{}' "select core.heartbeat_job('$T2')"
+
+echo "# raw layer and provisioning grants (design 0003 §6.1, §6.2)"
+fails "api_rt cannot read raw objects" as api_rt "$(claims $CHIEF aal2)" "select count(*) from core.raw_object"
+fails "worker_c2 cannot read raw objects" as worker_c2 '{}' "select count(*) from core.raw_object"
+fails "worker_c1 cannot insert a data_source" as worker_c1 '{}' "insert into core.data_source (source_id,name,terms_url,cadence) values ('x','x','','* * * * *')"
+equals "raw_object and suppression are forced-RLS, C1 and audited" "2|2|2" sup "select count(*) filter (where relforcerowsecurity), count(*) filter (where obj_description(c.oid,'pg_class')='class=C1'), (select count(*) from pg_trigger t where t.tgrelid in ('core.raw_object'::regclass,'core.suppression'::regclass) and t.tgname='audit') from pg_class c where c.oid in ('core.raw_object'::regclass,'core.suppression'::regclass)"
+equals "tenant connectors are provisioned by migrate" "ibge-municipios|0 6 1 * *" sup "select source_id||'|'||cadence from core.data_source"
+
 echo "# API against Postgres (design 0002 §9, test 5 and 7): operator CLI, hook, activation, staff, audit"
 ok "core-api end to end (packages/core-api/test/api-pg.test.js)" bash -c "cd $ROOT && TEST_DB=$DB node --test packages/core-api/test/api-pg.test.js 2>&1"
 psql -X -q -U postgres -d postgres -c "drop database if exists ${DB}_api" >/dev/null

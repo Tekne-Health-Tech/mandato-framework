@@ -55,6 +55,10 @@
 | migrator | audit.write(p_action text, p_entity text, p_entity_id text, p_details jsonb) | EXECUTE |
 | migrator | core.add_staff_key(p_key_id uuid, p_purpose text, p_wrapped bytea) | EXECUTE |
 | migrator | core.create_bootstrap_invitation(p_id uuid, p_name bytea, p_email bytea, p_bi bytea) | EXECUTE |
+| migrator | core.data_source (cadence) | INSERT |
+| migrator | core.data_source (name) | INSERT |
+| migrator | core.data_source (source_id) | INSERT, SELECT |
+| migrator | core.data_source (terms_url) | INSERT |
 | migrator | core.staff_keys() | EXECUTE |
 | migrator | core.uuid7() | EXECUTE |
 | worker_c1 | audit.bind_lease(p_token text) | EXECUTE |
@@ -75,8 +79,10 @@
 | worker_c1 | core.content_version | SELECT |
 | worker_c1 | core.data_source | SELECT, UPDATE |
 | worker_c1 | core.data_source_run | INSERT, SELECT, UPDATE |
+| worker_c1 | core.finish_job(p_token text, p_ok boolean, p_error text) | EXECUTE |
 | worker_c1 | core.has_permission(p_permission text) | EXECUTE |
 | worker_c1 | core.has_role(p_role text) | EXECUTE |
+| worker_c1 | core.heartbeat_job(p_token text) | EXECUTE |
 | worker_c1 | core.instance | SELECT |
 | worker_c1 | core.is_aal2() | EXECUTE |
 | worker_c1 | core.is_staff() | EXECUTE |
@@ -93,6 +99,9 @@
 | worker_c1 | core.media_asset | SELECT |
 | worker_c1 | core.municipality | SELECT |
 | worker_c1 | core.publish_media(p_content uuid) | EXECUTE |
+| worker_c1 | core.raw_object | DELETE, INSERT, SELECT |
+| worker_c1 | core.reclaim_jobs(p_stale interval) | EXECUTE |
+| worker_c1 | core.suppression | INSERT, SELECT, UPDATE |
 | worker_c1 | core.uuid7() | EXECUTE |
 | worker_c2 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c2 | audit.pool_classes(p_role name) | EXECUTE |
@@ -114,8 +123,10 @@
 | worker_c2 | core.data_source (source_id) | SELECT |
 | worker_c2 | core.data_source (terms_url) | SELECT |
 | worker_c2 | core.data_source (updated_at) | SELECT |
+| worker_c2 | core.finish_job(p_token text, p_ok boolean, p_error text) | EXECUTE |
 | worker_c2 | core.has_permission(p_permission text) | EXECUTE |
 | worker_c2 | core.has_role(p_role text) | EXECUTE |
+| worker_c2 | core.heartbeat_job(p_token text) | EXECUTE |
 | worker_c2 | core.instance | SELECT |
 | worker_c2 | core.is_aal2() | EXECUTE |
 | worker_c2 | core.is_staff() | EXECUTE |
@@ -131,6 +142,7 @@
 | worker_c2 | core.job (state) | SELECT, UPDATE |
 | worker_c2 | core.media_asset | SELECT |
 | worker_c2 | core.municipality | SELECT |
+| worker_c2 | core.reclaim_jobs(p_stale interval) | EXECUTE |
 | worker_c2 | core.uuid7() | EXECUTE |
 | worker_c3 | audit.bind_lease(p_token text) | EXECUTE |
 | worker_c3 | audit.pool_classes(p_role name) | EXECUTE |
@@ -152,8 +164,10 @@
 | worker_c3 | core.data_source (source_id) | SELECT |
 | worker_c3 | core.data_source (terms_url) | SELECT |
 | worker_c3 | core.data_source (updated_at) | SELECT |
+| worker_c3 | core.finish_job(p_token text, p_ok boolean, p_error text) | EXECUTE |
 | worker_c3 | core.has_permission(p_permission text) | EXECUTE |
 | worker_c3 | core.has_role(p_role text) | EXECUTE |
+| worker_c3 | core.heartbeat_job(p_token text) | EXECUTE |
 | worker_c3 | core.instance | SELECT |
 | worker_c3 | core.is_aal2() | EXECUTE |
 | worker_c3 | core.is_staff() | EXECUTE |
@@ -169,4 +183,5 @@
 | worker_c3 | core.job (state) | SELECT, UPDATE |
 | worker_c3 | core.media_asset | SELECT |
 | worker_c3 | core.municipality | SELECT |
+| worker_c3 | core.reclaim_jobs(p_stale interval) | EXECUTE |
 | worker_c3 | core.uuid7() | EXECUTE |
