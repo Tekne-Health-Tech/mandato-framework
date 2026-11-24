@@ -1,6 +1,6 @@
 # Design 0004 — Instance bootstrap, worker runtime and fetch sidecar (E0.7)
 
-Status: **Draft (v2)** · 2026-11-24 · Builds on designs 0001–0003. Owner: architecture backbone. v2 answers the Codex review `egm/0004/stage1-codex.md`; §11 maps each finding.
+Status: **Draft (v3)** · 2026-11-24 · Builds on designs 0001–0003. Owner: architecture backbone. v2 answers the Codex review `egm/0004/stage1-codex.md`; v3 answers the re-check `egm/0004/stage2-codex.md`; §11 maps each finding.
 
 ## 1. Problem
 
@@ -49,12 +49,13 @@ Ingress for the API (the Supabase auth hook calls it) and the API's own outbound
 1. Every 60 s: `core.reclaim_jobs()`.
 2. `core.claim_job(queues, worker_id)` for the registered queues of its pool (§4.3); idle sleep 2–10 s with jitter. One job at a time per process.
 3. On claim, the loop starts a **heartbeat thread** that calls `core.heartbeat_job(lease)` every 60 s for as long as the job runs, for every job (the connector runner's own heartbeat is removed; it uses this one). Reclaim threshold stays 10 min.
-4. **Finalization is owned by the loop.** The handler returns a `JobResult(ok, detail)`; the loop calls `core.finish_job(lease, ok, detail if not ok else null)`, where `detail` must be a code (`^[a-z][a-z0-9_]{0,40}$`), otherwise `bad_result`. Exceptions: an exception becomes `internal` (type to the log, never values). One handler finishes its own job atomically with its data and returns `FINISHED`: the connector runner (`core.connector_run`), which calls `finish_job` inside its tx2 (design 0003). If `finish_job` then raises `job: invalid lease` the loop logs `lease_lost` and moves on. Resulting states are those of `finish_job`: `done`, or `queued` with backoff, or `dead` (terminal codes or attempts exhausted). There is no `failed` state from the loop.
-5. `SIGTERM`: stop claiming; the running job continues with its heartbeat until it returns; then exit 0. There is no internal hard bound: the orchestrator's grace period is the bound (`stop_grace_period: 15m` in compose). A job still running when the grace ends is killed and handled as below. On `SIGKILL` or crash, Postgres rolls back the open transaction when the connection drops; the lease goes stale and is reclaimed; the next run of a connector closes its orphaned `running` run (0003 §13). Handlers must therefore be safe to re-run after a crash (already true for connectors; required of module jobs by the job contract).
+4. **Finalization is owned by the loop for module jobs.** A module `Job.run` returns the frozen `JobResult(ok, detail)`; the loop calls `core.finish_job(lease, ok, detail if not ok else null)`, where `detail` must be a code (`^[a-z][a-z0-9_]{0,40}$`), otherwise `bad_result`. An exception becomes `internal` (type to the log, never values). The framework's own queues (`core.connector_run`, `core.takedown`, `core.noop`) are **not** `Job` objects: the loop dispatches them to built-in functions that finish the job themselves (the connector runner calls `finish_job` inside its tx2, design 0003), so the `JobResult` contract is unchanged. If any `finish_job` raises `job: invalid lease` the loop logs `lease_lost` and moves on. Resulting states are those of `finish_job`: `done`, or `queued` with backoff, or `dead` (terminal codes or attempts exhausted). There is no `failed` state from the loop.
+5. Liveness: after each loop iteration (claim attempt, idle sleep or job end, and every heartbeat) the process touches `/run/mandato/alive` (tmpfs); the compose healthcheck fails if it is older than 3 min. The scheduler does the same after each tick.
+6. `SIGTERM`: stop claiming; the running job continues with its heartbeat until it returns; then exit 0. There is no internal hard bound: the orchestrator's grace period is the bound (`stop_grace_period: 15m` in compose). A job still running when the grace ends is killed and handled as below. On `SIGKILL` or crash, Postgres rolls back the open transaction when the connection drops; the lease goes stale and is reclaimed; the next run of a connector closes its orphaned `running` run (0003 §13). Handlers must therefore be safe to re-run after a crash (already true for connectors; required of module jobs by the job contract).
 
 ### 4.2 Registry
 
-Module workers are found from `tenant.yaml` → enabled modules → `mandato.module.json` `worker` path → the package's `JOBS` and `CONNECTORS` lists (no free-form import strings). `check_registry` (0003) runs at start; a refusal stops the worker with a clear error. The trust boundary is the worker process: every enabled module's code runs in it, so modules are trusted at code-review level, not isolated from each other at runtime (§6 limits the sidecar to the job the process currently holds).
+Module workers are found from `tenant.yaml` → enabled modules → `mandato.module.json` `worker` path → the package's `jobs` and `connectors` lists (as frozen in contract 0.2.0 and exported by the demo module) (no free-form import strings). `check_registry` (0003) runs at start; a refusal stops the worker with a clear error. The trust boundary is the worker process: every enabled module's code runs in it, so modules are trusted at code-review level, not isolated from each other at runtime (§6 limits the sidecar to the job the process currently holds).
 
 ### 4.3 Pools
 
@@ -65,7 +66,7 @@ The set of pools an instance needs is the set of `data_class` values of its regi
 ### 5.1 Declarations
 
 - **Connectors**: `tenant.yaml` `connectors[]` gains `enabled: boolean` (default `true`). Schedule identity: `conn:<source_id>`; queue `core.connector_run`; class from the manifest; payload `{source_id}`.
-- **Module jobs**: `mandato.module.json` gains `schedules: [{id, queue, cron, data_class, payload}]` — `id` `^[a-z][a-z0-9_]{1,40}$` unique in the module, `queue` one of the module's own queues (`<short>.<name>`), `cron` as §5.2, `data_class` among the module's classes, `payload` a constant object without secret-like keys (the `noSecrets` rule of the tenant schema). Identity: `mod:<short>.<id>`. `tenant.yaml` gains `schedules: {<short>.<id>: {enabled: false}}` to switch one off. Validators (`validate --strict`, JS) and the Python registry enforce both; fixtures in the demo tenant cover both.
+- **Module jobs**: `mandato.module.json` gains `schedules: [{id, queue, cron, payload}]` — `id` `^[a-z][a-z0-9_]{1,40}$` unique in the module, `queue` one of the module's own queues (`<short>.<name>`), `cron` as §5.2, no `data_class` field: the class is taken from the registered `Job` of that queue (`check_registry` refuses a schedule whose queue has no registered job, so a scheduled job can never be unclaimable or mis-pooled), `payload` a constant object without secret-like keys (the `noSecrets` rule of the tenant schema). Identity: `mod:<short>.<id>`. `tenant.yaml` gains `schedules: {<short>.<id>: {enabled: false}}` to switch one off. Validators (`validate --strict`, JS) and the Python registry enforce both; fixtures in the demo tenant cover both.
 - Idempotency key of a scheduled job: `sched:<identity>:<minute UTC, ISO 8601, e.g. 2026-11-24T09:00Z>`.
 
 ### 5.2 Cron and time
@@ -75,21 +76,21 @@ Five fields; `*`, numbers, lists, ranges, steps on `*` or a range; Sunday is 0 o
 ### 5.3 Tick (every 60 s)
 
 For each enabled identity, in its own short transaction:
-1. `last := max(run_after)` of jobs with that queue and idempotency-key prefix `sched:<identity>:` (index-supported prefix scan).
-2. Due minutes in `(last, now]`, capped at the last 60 minutes; older due minutes are skipped and counted in the `scheduler.skipped` log line (operators alert on it; monitoring is E7.1).
+1. `last := max(run_after)` of jobs with that queue and `left(idempotency_key, length(:prefix)) = :prefix`, where `prefix = 'sched:<identity>:'` (exact comparison, no `LIKE` wildcards).
+2. Due minutes in `(last, now]`, capped at the last 60 minutes; when `last` is null (new or long-pruned schedule) only the current minute is considered, so a new schedule starts firing from its next due minute; older due minutes are skipped and counted in the `scheduler.skipped` log line (operators alert on it; monitoring is E7.1).
 3. `insert into core.job (…, run_after = <minute>, idempotency_key = …) on conflict (queue, idempotency_key) do nothing` per minute.
 Two schedulers, a restart or a re-tick insert nothing twice; a failed identity does not roll back another.
 
 ### 5.4 Role
 
-New role `scheduler` (login, no other membership): `insert` on `core.job` with policy `state = 'queued' and lease_hash is null and idempotency_key like 'sched:%'`; `select (queue, idempotency_key, run_after)` on `core.job` with a policy limited to `idempotency_key like 'sched:%'`; nothing else (no `claim_job`, no module schema). `core.job` is not audited row by row (0001), so no lease is needed. The grants matrix and `run.sh` assert it.
+New role `scheduler` (login, no other membership): `insert` on `core.job` with policy `state = 'queued' and lease_hash is null and left(idempotency_key, 6) = 'sched:'`; `select (queue, idempotency_key, run_after)` on `core.job` with a policy limited to `left(idempotency_key, 6) = 'sched:'`; nothing else (no `claim_job`, no module schema). `core.job` is not audited row by row (0001), so no lease is needed. The grants matrix and `run.sh` assert it.
 
 ## 6. Fetch sidecar (`workers/core/fetch/sidecar.py`)
 
 - A stdlib HTTP server on a Unix socket in `sock_c1` (`/run/mandato/fetch.sock`, mode 0660, group shared by the two uids). No TCP listener. Its only outbound routes: `db` and `fetch_c1` → `egress`.
 - Request: `POST /fetch` JSON `{lease, url, params, headers}`. **The capability is the job lease the worker holds**, not anything the worker names. The sidecar (database role `fetch_c1`) calls `core.fetch_grant(lease)`, a security-definer function that returns `(job_id, source_id)` only when the lease matches a `running` job of queue `core.connector_run` whose `locked_at` is within the reclaim threshold, and the source is provisioned and enabled; otherwise it raises. The sidecar then loads that source's manifest from its own registry copy and applies `FetchClient` (policy, robots, rate limit per source, budgets per `job_id` held in the sidecar). A worker can therefore fetch only for the connector job it currently holds; a lease from another container is unknown to it.
 - API keys: the sidecar reads `/run/secrets/<auth_secret_ref>`, where `auth_secret_ref` must match `^[a-z][a-z0-9_]{1,60}$` and appear in the instance's configured secret list; the file is opened with `O_NOFOLLOW` under a directory fd of `/run/secrets` (no traversal, no symlinks).
-- Response: `{status, headers, body_b64, raw_ref}` after the sidecar writes the blob and its `core.raw_object` row (it records with the worker's lease, as the in-process recorder does). Role `fetch_c1`: execute `core.fetch_grant` and `audit.bind_lease`, `insert` on `core.raw_object` under the same policy as `worker_c1`; nothing else. Response headers pass through an allow-list (`content-type`, `etag`, `last-modified`, `content-length`); the auth header is never echoed by the framework.
+- Response: `{status, headers, body_b64}`. The sidecar writes nothing to the database or the raw store: the worker records the response exactly as the in-process client does (`Recorder`, under its own lease as `worker_c1`), so the audit model is unchanged. Role `fetch_c1` (login): execute `core.fetch_grant` only; `fetch_grant` is owned by `core_owner` and refuses any `session_user` other than `fetch_c1`. Response headers pass through an allow-list (`content-type`, `etag`, `last-modified`, `content-length`); the auth header is never echoed by the framework.
 - **Guarantee, narrowed**: the secret never appears in the worker's environment, mounts, framework logs, or framework-generated response fields. An upstream that echoes the credential in its own body is outside what any proxy can prove; the connector review checks sources for it, and such a source must use a structured parser in the sidecar (later lane), not raw bodies.
 - Worker side: `SidecarHttp` implements `Http.get` over the socket. The runner uses it when `MANDATO_FETCH=sidecar` (set in the images); `inprocess` is for tests only; unset → the worker refuses to start connector jobs.
 
@@ -97,7 +98,7 @@ New role `scheduler` (login, no other membership): `insert` on `core.job` with p
 
 - `infra/images/lock.json`: for each base image, `name`, `platform` (`linux/amd64`, `linux/arm64`), the per-platform `digest`, `source` (registry URL), `released` (date), `licence_scope`. Dockerfiles take `FROM name@digest` only; CI job `images` checks every `FROM` is in the lock, every entry is at least 14 days older than the commit that added it, and fails on tags.
 - SBOM (`syft`, Apache-2.0) and vulnerability scan (`grype`, Apache-2.0) run in CI on the built images, both pinned by version and checksum; a critical/high CVE with a fix available fails the job; accepted exceptions live in `infra/images/vuln-exceptions.yaml` with expiry dates.
-- **Licence scope** (declared for veto): the "permissive only" rule applies to libraries linked into or shipped as part of the framework (npm and Python dependencies, already gated). The Debian-based runtime images contain GPL programs as separate works (mere aggregation); they are allowed and listed by the SBOM. Our image layers add only framework code and the hashed dependencies.
+- **Licence scope** (owner decision, see the AGENTS.md amendment in this lane): AGENTS.md rule 2 forbids third-party GPL/LGPL/AGPL code copied into or linked with the framework. No Linux base image is free of GPL programs (busybox, coreutils, glibc is LGPL; the kernel itself is GPL), and the framework neither copies nor links them: they are separate programs in the runtime image. v3 therefore proposes amending rule 2 to state its scope explicitly: it governs repository code and declared dependencies; OS packages of the pinned base images are allowed as separate works, inventoried by the SBOM, with no framework code linking against GPL libraries (Python and Node runtimes themselves are PSF/MIT). Until the owner approves the amendment, images are built and tested in CI but not published.
 - GitHub Actions in `ci.yml` are pinned to commit SHAs in this lane.
 
 ## 8. `mandato instance`
@@ -109,11 +110,11 @@ mandato instance check <tenantDir> --env local|staging [--probe] ...
 mandato instance down  <tenantDir> --env local        # local only; refuses staging
 ```
 
-**Preflight (read-only, before any write):** `validate --strict`; resolve secrets; for staging, check `--confirm` equals `--project-ref`, check the database URL names that project (`db.<ref>.supabase.co` or pooler user `postgres.<ref>`), connect read-only and read `core.instance` if it exists: its `(tenant_id, env)` must match, or the database must have no `core` schema at all (first install). Any mismatch stops before writing.
+**Preflight (read-only, before any write):** `validate --strict`; resolve secrets; for staging, check `--confirm` equals `--project-ref`, check the database URL names that project (`db.<ref>.supabase.co` or pooler user `postgres.<ref>`), connect read-only and read `core.instance` if it exists: its `slug` must equal `tenant.yaml` `slug` and its `env` must equal `--env`, or the database must have no `core` schema at all (first install); for staging, the read-only part of `auth check` (hook configured, secret matches, TOTP-only) also runs here. Any mismatch stops before writing.
 
-**Then, in order:** `bootstrap` → `migrate` (writes `core.instance (tenant_id, env, created_at)` once) → `keys init` (KEK from env/secret, never generated for staging) → `auth check` (staging) → generate compose for the needed pools → `compose up` → `check`. Local demo reset runs only when the database was created in this `up` or with `--reset-demo`; so a second `up` with the same inputs changes nothing (the test compares a schema+data checksum before and after).
+**Then, in order:** `bootstrap` → `migrate` (migration `0005_core.sql` adds `core.instance.env text not null check (env in ('local','staging','production'))`, set at first bootstrap and refused on change by a trigger; `slug` already exists) → `keys init` (KEK from env/secret, never generated for staging) → generate compose for the needed pools → `compose up` → `check`. Local demo reset runs only when the database was created in this `up` or with `--reset-demo`; so a second `up` with the same inputs changes nothing (the test compares a schema+data checksum before and after).
 
-**`check`** is read-only: migrations recorded and unchanged, `core.instance` matches, keys present for every staff purpose, roles hardened, each needed pool's worker has a recent `claim` heartbeat in the log, the scheduler's last tick is recent. `--probe` additionally enqueues one `core.noop` job keyed `probe:<uuid>` for each pool and waits for `done`; probe rows are ordinary finished jobs, removed by the normal job retention.
+**`check`** is read-only: migrations recorded and unchanged, `core.instance` matches, keys present for every staff purpose, roles hardened, every generated service is `healthy` in `docker compose ps` (the liveness file of §4.1, which an idle worker refreshes too). `--probe` additionally enqueues one `core.noop` job keyed `probe:<uuid>` for each pool and waits for `done`; probe rows are ordinary finished jobs, removed by the normal job retention.
 
 ## 9. Network test (`infra/compose/test-network.sh`, CI job `network`)
 
@@ -153,7 +154,14 @@ Passing this test is the release gate of design 0003 §3.4 for enabling connecto
 | 8 | 25 s bound | §4.1: hard bound removed; orchestrator grace; SIGKILL/rollback/reclaim tested |
 | 9 | only worker-c1 | §4.3: one worker per needed pool; c2/c3 connectors refused in this lane; §9.2 cross-pool checks |
 | 10 | bootstrap idempotency/wrong target | §8: read-only preflight with project/DB identity binding and `core.instance`; `--confirm`; demo reset only on creation or explicit; `check` read-only, `--probe` opt-in |
-| 11 | image supply chain | §7: lock file with per-platform digests and dates, CI gate, SBOM + scan, licence scope declared, actions pinned by SHA |
+| 11 | image supply chain | §7: lock file with per-platform digests and dates, CI gate, SBOM + scan, actions pinned by SHA; licence scope proposed as an AGENTS.md amendment for the owner (v3) |
+| s2-5 | `JOBS` vs `jobs`; schedule class | v3 §4.2 lowercase as frozen; §5.1 class taken from the registered job |
+| s2-6 | null `last`; `LIKE` wildcards | v3 §5.3 null → current minute only; exact `left()` prefix |
+| s2-7 | `FINISHED` not in contract | v3 §4.1: framework queues are built-ins outside the `Job` protocol; contract unchanged |
+| s2-10 | `core.instance` has no `tenant_id`/`env`; auth check after writes | v3 §8: bind on existing `slug` + new `env` column (0005); read-only auth check moved into preflight |
+| s2-11 | licence position not an approved exception | v3 §7: AGENTS.md amendment put to the owner; no image published before |
+| N1 | `fetch_c1` cannot bind leases | v3 §6: sidecar writes nothing; worker records under its own lease |
+| N2 | idle instance fails `check` | v3 §4.1/§8: liveness file refreshed while idle; `check` reads compose health |
 
 Non-blocking: the 60-minute cap's skipped runs are logged (§5.3) for alerting in E7.1.
 
