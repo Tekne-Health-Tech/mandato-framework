@@ -1,0 +1,49 @@
+# Claude Approvals policy (Claude Ship, public beta). Docs:
+# https://code.claude.com/docs/en/approvals-policy
+#
+# Solo-maintainer design. Pull requests here are opened by agents under the
+# maintainer's account, so the PR author is the maintainer and cannot be the
+# gate. The gate is:
+#   - ordinary paths: Claude Code Review passes (no Important finding open)
+#     -> Claude approves; GitHub auto-merge merges once the required CI checks
+#     (ruleset) are green too;
+#   - sensitive paths: never merge on Claude's approval. A person who is not
+#     the author must approve, or the maintainer merges with the ruleset's
+#     admin bypass after reading the PR.
+#
+# Starts in observe mode: the check reports and blocks nothing. Enforcing is
+# the maintainer's decision: delete the `mode` line in its own PR.
+version: 1
+mode: observe
+rules:
+  - purpose: "Ordinary change: Claude approves when its review passes; otherwise a person who isn't the author decides."
+    paths: ["**"]
+    verdict: { claude: comments, seats: [{ count: 1, from: [humans, "!pr/authors"] }] }
+    override:
+      - if: "claude/code_review = pass"
+        verdict: { claude: approves, seats: [{ count: 1, from: bot:claude }] }
+
+  - purpose: "Sensitive paths (review rules, CI, license/CLA, agent instructions, dependencies, frozen contracts, database, crypto) always need a person who isn't the author."
+    paths:
+      - ".github/**"
+      - "**/.claude/**"
+      - "REVIEW.md"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "LICENSE"
+      - "NOTICE"
+      - "CLA.md"
+      - "CONTRIBUTING.md"
+      - "package.json"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "scripts/**"
+      - "packages/core-contracts/**"
+      - "packages/db/**"
+      - "packages/crypto/**"
+      - "workers/core/crypto/**"
+      - "tests/fixtures/negative/**"
+    nested: inherit
+    verdict: { claude: comments, seats: [{ count: 1, from: [humans, "!pr/authors"] }] }
+    advisory: [claude/code_review]
