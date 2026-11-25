@@ -16,15 +16,15 @@
     },
     {
       "name": "node",
-      "tag": "22.23.4-trixie-slim",
+      "tag": "22.23.5-trixie-slim",
       "source": "https://hub.docker.com/_/node",
-      "digest": "sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6",
+      "digest": "sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64",
       "platforms": {
-        "linux/amd64": "sha256:8658a93ea0778be81c513e04eba758202973b91f8c83144f5a41efbb5d2bf0a9",
-        "linux/arm64": "sha256:46d668ccd1d1ab1d33c3681f16fa5b8708eac04f483a6c7c5afcefa14493ddd0"
+        "linux/amd64": "sha256:33d41cc7365593a3622f3f1ce1c6af788de32c0709016ec15685de7aaa681d97",
+        "linux/arm64": "sha256:39f1e114378b809e9db27ecdcaa96c754bd543ff80a92190d303065639a8659d"
       },
-      "released": "2026-11-05",
-      "added": "2026-11-24",
+      "released": "2026-11-11",
+      "added": "2026-11-25",
       "licence_scope": "Node.js runtime (MIT) on Debian trixie; only the node binary is copied into the tools image"
     },
     {

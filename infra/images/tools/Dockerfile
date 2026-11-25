@@ -1,7 +1,7 @@
 # Operator tools for `mandato instance up`: psql (from the Postgres image) plus Node for the mandato CLI.
 # Runs only as a one-shot container on the database network; never part of the running instance.
 # Copyright (C) 2026 Tekne Health Tech Ltda. — AGPL-3.0-only
-FROM node:22.23.4-trixie-slim@sha256:be1e2a3dc2c4fd68cdfadad2a696a280e0d2749098bee509230174d72fb768c6 AS node
+FROM node:22.23.5-trixie-slim@sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64 AS node
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages packages
