@@ -1,4 +1,6 @@
-# Claude Approvals policy (Claude Ship, public beta). Docs:
+# Claude Approvals policy (Claude Ship, public beta; needs a Claude Team or
+# Enterprise plan, so it stays inactive while the maintainer is on Max).
+# On Max the same gate runs as .github/workflows/claude-review.yml. Docs:
 # https://code.claude.com/docs/en/approvals-policy
 #
 # Solo-maintainer design. Pull requests here are opened by agents under the
