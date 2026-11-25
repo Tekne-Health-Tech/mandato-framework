@@ -16,5 +16,6 @@ This repository is **public** and licensed **AGPL-3.0-only**, copyright Tekne He
 - **Design before code.** Non-trivial work starts with a design doc reviewed with the Elephant-Goldfish method; code that drifts from the reviewed design is flagged in the sprint drift report.
 - **Ponytail.** Climb the YAGNI ladder: no abstraction, option or file the current task does not need. Run `/ponytail-review` on your diff before opening a PR.
 - **Cross-provider review.** The reviewer runs on a different AI provider than the executor. Security-sensitive changes (auth, RLS, crypto, audit) get two reviewers.
+- **Claude review gate.** Once the `Claude review gate` check (`.github/workflows/claude-review.yml`, or `.claude/approvals.yml` on a Team plan) is required, an ordinary change may merge on its own when Claude Code Review passes and the required CI checks are green. The paths marked sensitive there keep the cross-provider review above and are merged by the maintainer. Review criteria: `REVIEW.md`.
 - **Definition of done** is verified by someone who did not execute the task. An agent never certifies its own work as done.
 - Branch per task, draft PR, CI green before review.
