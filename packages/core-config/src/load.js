@@ -64,6 +64,7 @@ export function loadTenant(dir, { strict = false } = {}) {
 
   const enabled = new Set(config.modules.map((m) => m.id));
   const shorts = new Map();
+  const scheduleIds = new Set();
   for (const m of config.modules) {
     const [vendor, name] = m.id.split('.');
     if (vendor === 'core') {
@@ -78,6 +79,7 @@ export function loadTenant(dir, { strict = false } = {}) {
     if (!schemas.module(manifest)) { errors.push(...fmt(`module ${m.id}`, schemas.module.errors)); continue; }
     if (manifest.id !== m.id) errors.push(`module ${m.id}: manifest declares ${manifest.id}`);
     errors.push(...checkModule(manifest).map((p) => `module ${m.id}: ${p}`));
+    for (const sc of manifest.schedules ?? []) scheduleIds.add(`${manifest.short}.${sc.id}`);
     // §7.1: `short` names the owner role and schema (mod_<short>), so it must be unique in the instance.
     if (shorts.has(manifest.short)) errors.push(`module ${m.id}: short ${manifest.short} is already used by ${shorts.get(manifest.short)}`);
     else shorts.set(manifest.short, m.id);
@@ -95,6 +97,7 @@ export function loadTenant(dir, { strict = false } = {}) {
       if (!v(m.settings ?? {})) errors.push(...fmt(`module ${m.id} settings`, v.errors));
     } else if (m.settings && Object.keys(m.settings).length) errors.push(`module ${m.id}: settings given but the module declares no settings_schema`);
   }
+  for (const key of Object.keys(config.schedules ?? {})) if (!scheduleIds.has(key)) errors.push(`schedules: ${key} names no schedule of an enabled module`);
   for (const c of config.connectors ?? []) {
     const paramsSchema = INSTALLED_CONNECTORS[c.source_id];
     if (!paramsSchema) { pending.push(`connector ${c.source_id} is not delivered yet`); continue; }

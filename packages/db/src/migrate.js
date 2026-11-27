@@ -12,7 +12,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { inside, loadTenant } from '../../core-config/src/load.js';
+import { FRAMEWORK_VERSION, inside, loadTenant } from '../../core-config/src/load.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const CORE_DIR = join(root, 'packages/db/migrations');
@@ -41,7 +41,8 @@ const FORBIDDEN = [
 ];
 export function forbiddenStatements(sql) {
   const code = sql.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/'(?:[^']|'')*'/g, "''")
-    .replace(/\breferences\s+core\.\w+\s*\(\s*id\s*\)/gi, 'references ok');   // FK to a core id column is allowed (§7.2)
+    .replace(/\breferences\s+core\.\w+\s*\(\s*id\s*\)/gi, 'references ok')   // FK to a core id column is allowed (§7.2)
+    .replace(/\bexecute\s+function\s+audit\.row_trigger\s*\(\s*\)/gi, 'execute ok');   // the audit row trigger (design 0003 §6.4)
   return FORBIDDEN.filter(([re]) => re.test(code)).map(([, why]) => why);
 }
 
@@ -93,8 +94,24 @@ export function bootstrap(db, tenantDir, superuser = process.env.PGUSER || 'post
       end $$;
       create schema if not exists ${'mod_' + m.short} authorization ${role};
       revoke all on schema ${'mod_' + m.short} from public;
-      grant ${role} to migrator;`);
+      grant ${role} to migrator;
+      grant usage on schema audit to ${role};
+      grant execute on function audit.row_trigger() to ${role};   -- module tables carry the audit trigger (design 0003 §6.4)
+      grant usage on schema ${'mod_' + m.short} to audit_owner;    -- audit.write resolves the entity name; no table rights`);
   }
+}
+
+/** Every migration this tenant's history must hold, with its file hash: core, then each enabled module (design 0004 §8,
+ * `instance check`: recorded and unchanged). */
+export function expectedMigrations(tenantDir) {
+  const out = coreFiles().map((f) => ({ module: 'core', id: f, sha256: sha(readFileSync(join(CORE_DIR, f), 'utf8')) }));
+  for (const m of localModules(tenantDir)) {
+    if (!m.migrations || !existsSync(m.migrations)) continue;
+    for (const f of readdirSync(m.migrations).filter((x) => x.endsWith('.sql')).sort()) {
+      out.push({ module: m.id, id: f, sha256: sha(readFileSync(join(m.migrations, f), 'utf8')) });
+    }
+  }
+  return out;
 }
 
 export function migrate(db, tenantDir, migrator = 'migrator') {
@@ -138,5 +155,42 @@ export function migrate(db, tenantDir, migrator = 'migrator') {
       commit;`);
     done.push(key);
   }
+  provisionSources(db, tenantDir, migrator);
   return done;
+}
+
+// Design 0003 §6.1: one core.data_source row per tenant.yaml connector. name and terms_url are placeholders that the
+// connector runner replaces from the manifest on the first run; existing rows are never changed here.
+function provisionSources(db, tenantDir, migrator) {
+  const { config } = loadTenant(tenantDir);
+  const rows = (config.connectors ?? []).map((c) => `(${lit(c.source_id)}, ${lit(c.source_id)}, '', ${lit(c.schedule)})`);
+  if (!rows.length) return;
+  psql(db, migrator, `begin; select audit.bind_migration('core', 'sources');
+    insert into core.data_source (source_id, name, terms_url, cadence) values ${rows.join(', ')} on conflict (source_id) do nothing;
+    commit;`);
+}
+
+// Design 0004 §8: the instance row is registered once from tenant.yaml, as migrator under a migration lease.
+// env is set on first registration and fixed afterwards (core.instance_env_fixed); a different slug or env aborts.
+export function registerInstance(db, tenantDir, env, migrator = 'migrator') {
+  if (!['local', 'staging', 'production'].includes(env)) throw new Error(`instance: unknown env ${env}`);
+  const { config } = loadTenant(tenantDir);
+  const i = config.instance;
+  const cur = psql(db, migrator, 'select json_build_object(\'slug\', slug, \'env\', env, \'name\', display_name, \'version\', framework_version) from core.instance');
+  if (cur) {
+    const { slug, env: have, name, version } = JSON.parse(cur);
+    if (slug !== i.slug) throw new Error(`instance: database belongs to '${slug}', tenant.yaml is '${i.slug}'`);
+    if (have && have !== env) throw new Error(`instance: database is '${have}', not '${env}'`);
+    if (have === env && name === i.display_name && version === FRAMEWORK_VERSION) return 'unchanged';
+    psql(db, migrator, `begin; select audit.bind_migration('core', 'instance');
+      update core.instance set env = ${lit(env)}, display_name = ${lit(i.display_name)}, framework_version = ${lit(FRAMEWORK_VERSION)};
+      commit;`);
+    return 'updated';
+  }
+  psql(db, migrator, `begin; select audit.bind_migration('core', 'instance');
+    insert into core.instance (slug, display_name, house_acronym, uf, config_version, framework_version, env)
+    values (${lit(i.slug)}, ${lit(i.display_name)}, ${lit(i.house.acronym)}, ${lit(i.house.uf)}, ${lit(String(config.schema_version))},
+            ${lit(FRAMEWORK_VERSION)}, ${lit(env)});
+    commit;`);
+  return 'registered';
 }

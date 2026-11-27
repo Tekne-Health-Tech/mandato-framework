@@ -2,3 +2,5 @@ node_modules/
 __pycache__/
 *.pyc
 .venv/
+.mandato-demo.env
+infra/.state/

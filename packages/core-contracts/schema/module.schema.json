@@ -28,6 +28,18 @@
     "mobile": { "type": "string" },
     "worker": { "type": "string" },
     "settings_schema": { "type": "string" },
+    "schedules": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "queue", "cron"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,40}$" },
+          "queue": { "type": "string", "pattern": "^[a-z][a-z0-9]{1,15}\\.[a-z][a-z0-9_]{0,40}$" },
+          "cron": { "type": "string", "pattern": "^(\\S+\\s+){4}\\S+$" },
+          "payload": { "type": "object" }
+        }
+      }
+    },
     "retention": {
       "type": "array",
       "items": { "type": "object", "additionalProperties": false, "required": ["table", "days"], "properties": { "table": { "type": "string" }, "days": { "type": "integer", "minimum": 1 } } }

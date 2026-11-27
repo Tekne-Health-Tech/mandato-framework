@@ -1,0 +1,44 @@
+{
+  "comment": "Base images (design 0004 §7). Each entry: index digest plus per-platform digests, source and release date. The CI job `images` refuses a FROM that is not here, a tag without a digest, or an entry younger than 14 days at the commit that added it.",
+  "images": [
+    {
+      "name": "python",
+      "tag": "3.12.16-slim-trixie",
+      "source": "https://hub.docker.com/_/python",
+      "digest": "sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b",
+      "platforms": {
+        "linux/amd64": "sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177",
+        "linux/arm64": "sha256:c61cffc3bacb94ed026ff8b45d5114b7693dd0420baca0a1ace0e3d0ce9035fd"
+      },
+      "released": "2026-11-05",
+      "added": "2026-11-24",
+      "licence_scope": "Python runtime (PSF-2.0) on Debian trixie; OS packages are separate works, inventoried by the SBOM (design 0004 §7)"
+    },
+    {
+      "name": "node",
+      "tag": "22.23.5-trixie-slim",
+      "source": "https://hub.docker.com/_/node",
+      "digest": "sha256:68c76cfad89921b927eae28ba21407475e29d0ce450afcdbe70c1532db042b64",
+      "platforms": {
+        "linux/amd64": "sha256:33d41cc7365593a3622f3f1ce1c6af788de32c0709016ec15685de7aaa681d97",
+        "linux/arm64": "sha256:39f1e114378b809e9db27ecdcaa96c754bd543ff80a92190d303065639a8659d"
+      },
+      "released": "2026-11-11",
+      "added": "2026-11-25",
+      "licence_scope": "Node.js runtime (MIT) on Debian trixie; only the node binary is copied into the tools image"
+    },
+    {
+      "name": "postgres",
+      "tag": "16.15-trixie",
+      "source": "https://hub.docker.com/_/postgres",
+      "digest": "sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657",
+      "platforms": {
+        "linux/amd64": "sha256:43f9275df91e012c3da3d86bea5d7bb5e67a473296cc906c5f9e80b8176b1a37",
+        "linux/arm64": "sha256:dbac72df02f02f9f7c63e0e45735bbe37902608390ad9bd983d1cc3a018160fd"
+      },
+      "released": "2026-11-05",
+      "added": "2026-11-24",
+      "licence_scope": "PostgreSQL (PostgreSQL licence) on Debian trixie; local instances and the tools image only"
+    }
+  ]
+}

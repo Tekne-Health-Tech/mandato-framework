@@ -1,0 +1,4 @@
+{
+  "comment": "Accepted vulnerability exceptions for the instance images (design 0004 §7). Each entry: id (CVE/GHSA), image (worker|tools), reason, expires (YYYY-MM-DD, at most 90 days ahead). The CI job `supply-chain` fails on a critical or high finding with a fix available unless it is listed here and not expired; scripts/check_images.py refuses expired or open-ended entries.",
+  "exceptions": []
+}

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "slug": "rt",
+  "env": "local",
+  "timezone": "America/Fortaleza",
+  "tenant_root": ".",
+  "connectors": [],
+  "modules": [
+    { "id": "test.rt", "short": "rt", "worker": "modules/rt/worker/rt",
+      "schedules": [{ "id": "every_minute", "queue": "rt.ok", "cron": "* * * * *", "payload": {} },
+                    { "id": "off", "queue": "rt.ok", "cron": "* * * * *", "payload": {} }] }
+  ],
+  "schedule_overrides": { "rt.off": { "enabled": false } }
+}
